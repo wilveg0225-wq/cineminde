@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #0a0a0c;
+    color: #f4f4f6;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+    text-wrap: balance;
+  }
+
+  .font-mono-num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* iOS Safe Area Utilities for PWA & Home Screen standalone bookmark mode */
+.pt-safe-top {
+  padding-top: max(1rem, calc(env(safe-area-inset-top, 0px) + 0.75rem));
+}
+
+.pb-safe-bottom {
+  padding-bottom: max(1rem, calc(env(safe-area-inset-bottom, 0px) + 0.75rem));
+}
+
+@media all and (display-mode: standalone) {
+  .pt-safe-top {
+    padding-top: max(2.75rem, calc(env(safe-area-inset-top, 0px) + 0.75rem));
+  }
+}
+
+/* Subtle custom scrollbars for dark cinema theme */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a0c;
+}
+::-webkit-scrollbar-thumb {
+  background: #27272f;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f4a;
+}

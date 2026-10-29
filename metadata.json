@@ -1,0 +1,6 @@
+{
+  "name": "CineMinde — Personlig Filmguide",
+  "description": "Smart mobil-webbapp på svenska för skräddarsydda filmrekommendationer som lär sig din unika filmsmak.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
