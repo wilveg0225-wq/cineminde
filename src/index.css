@@ -34,7 +34,7 @@
 
 /* iOS Safe Area Utilities for PWA & Home Screen standalone bookmark mode */
 .pt-safe-top {
-  padding-top: max(65px, calc(env(safe-area-inset-top, 0px) + 0.75rem));
+  padding-top: max(70px, calc(env(safe-area-inset-top, 0px) + 0.75rem));
 }
 
 .pb-safe-bottom {
@@ -43,7 +43,7 @@
 
 @media all and (display-mode: standalone) {
   .pt-safe-top {
-    padding-top: max(65px, calc(env(safe-area-inset-top, 0px) + 0.75rem));
+    padding-top: max(70px, calc(env(safe-area-inset-top, 0px) + 0.75rem));
   }
 }
 
