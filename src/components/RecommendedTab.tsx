@@ -28,15 +28,32 @@ interface RecommendedTabProps {
   watchedMovies: WatchedMovie[];
   watchlist: MovieRecommendation[];
   tasteProfileSummary: string;
+  dislikedCategories?: string[];
   onAddToWatchlist: (movie: MovieRecommendation) => void;
   onMarkAsWatched: (movie: MovieRecommendation) => void;
   onGoToWatchlist: () => void;
+}
+
+const STORAGE_KEY_SEEN = "cineminde_recommended_seen_titles";
+
+function loadStoredSeenTitles(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_SEEN);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? new Set(parsed.map(normalizeMovieTitle).filter(Boolean))
+      : new Set();
+  } catch {
+    return new Set();
+  }
 }
 
 export const RecommendedTab: React.FC<RecommendedTabProps> = ({
   watchedMovies,
   watchlist,
   tasteProfileSummary,
+  dislikedCategories = [],
   onAddToWatchlist,
   onMarkAsWatched,
   onGoToWatchlist,
@@ -46,10 +63,24 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
     movie: MovieRecommendation;
     action: "like" | "skip";
   }[]>([]);
-  const [seenTitles, setSeenTitles] = useState<Set<string>>(() => new Set());
+  const [seenTitles, setSeenTitles] = useState<Set<string>>(loadStoredSeenTitles);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setRecsError] = useState<string | null>(null);
   const [showFullInfo, setShowFullInfo] = useState(false);
+
+  // Keep ref synchronized to always read the freshest seen set inside callbacks
+  const seenTitlesRef = useRef(seenTitles);
+  seenTitlesRef.current = seenTitles;
+
+  // Persist seen titles to localStorage so swiped movies are never repeated across sessions
+  useEffect(() => {
+    try {
+      const list = Array.from(seenTitles).slice(-1000);
+      localStorage.setItem(STORAGE_KEY_SEEN, JSON.stringify(list));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [seenTitles]);
 
   // Overview modal state (browse recommendations & restore swiped cards)
   const [isOverviewOpen, setIsOverviewOpen] = useState(false);
@@ -65,14 +96,15 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
 
   // Fetch a batch of recommendations based purely on the taste profile
   const fetchMoreRecommendations = useCallback(
-    async (isInitial = false) => {
+    async (isInitial = false, retryCount = 0) => {
       if (isFetchingRef.current) return;
       isFetchingRef.current = true;
       setIsLoading(true);
       setRecsError(null);
 
       try {
-        const previousTitles = Array.from(seenTitles);
+        const previousTitles = Array.from(seenTitlesRef.current);
+        const page = Math.floor(previousTitles.length / 8) + 1 + retryCount;
         const storedTmdbKey = localStorage.getItem("tmdbApiKey") || "";
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
@@ -88,6 +120,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
             watchedMovies,
             watchlist,
             tasteProfileSummary,
+            dislikedCategories,
             preferences: {
               moods: [],
               genres: [],
@@ -98,7 +131,8 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
               mediaType: "any",
             },
             previousTitles,
-            limit: 10,
+            page,
+            limit: 12,
           }),
         });
 
@@ -111,43 +145,53 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
           ? (data.recommendations as MovieRecommendation[])
           : [];
 
-        // Exclude movies already in watched or watchlist
+        // Exclude movies already in watched or watchlist or already shown
         const watchedOrWatchlist = new Set([
           ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
           ...watchlist.map((m) => normalizeMovieTitle(m.title)),
         ]);
 
+        const currentSeen = seenTitlesRef.current;
         const existingNorms = new Set([
           ...watchedOrWatchlist,
-          ...seenTitles,
+          ...currentSeen,
         ]);
 
-        let filtered = incoming.filter((r) => {
+        const filtered = incoming.filter((r) => {
           const norm = normalizeMovieTitle(r.title);
-          return !existingNorms.has(norm);
+          const origNorm = r.originalTitle
+            ? normalizeMovieTitle(r.originalTitle)
+            : "";
+          return (
+            !existingNorms.has(norm) &&
+            (!origNorm || !existingNorms.has(origNorm))
+          );
         });
 
-        // If all incoming were in seenTitles but deck is empty, allow cycling through un-saved recommendations
-        if (filtered.length === 0 && incoming.length > 0) {
-          filtered = incoming.filter((r) => {
-            const norm = normalizeMovieTitle(r.title);
-            return !watchedOrWatchlist.has(norm);
-          });
+        // NEVER loop or cycle through previously seen recommendations!
+        // If TMDB page had overlap and gave 0 new movies, automatically query the next page
+        if (filtered.length === 0 && incoming.length > 0 && retryCount < 2) {
+          isFetchingRef.current = false;
+          return await fetchMoreRecommendations(isInitial, retryCount + 1);
         }
 
-        setDeck((prev) => (isInitial ? filtered : [...prev, ...filtered]));
+        if (filtered.length > 0) {
+          setDeck((prev) => (isInitial ? filtered : [...prev, ...filtered]));
 
-        // Track seen titles
-        setSeenTitles((prev) => {
-          const next = new Set(prev);
-          for (const item of filtered) {
-            next.add(normalizeMovieTitle(item.title));
-            if (item.originalTitle) {
-              next.add(normalizeMovieTitle(item.originalTitle));
+          // Track newly introduced titles in seenTitles
+          setSeenTitles((prev) => {
+            const next = new Set(prev);
+            for (const item of filtered) {
+              const t1 = normalizeMovieTitle(item.title);
+              if (t1) next.add(t1);
+              if (item.originalTitle) {
+                const t2 = normalizeMovieTitle(item.originalTitle);
+                if (t2) next.add(t2);
+              }
             }
-          }
-          return next;
-        });
+            return next;
+          });
+        }
       } catch (err: unknown) {
         setRecsError(
           err instanceof Error
@@ -159,7 +203,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
         isFetchingRef.current = false;
       }
     },
-    [watchedMovies, watchlist, tasteProfileSummary, seenTitles]
+    [watchedMovies, watchlist, tasteProfileSummary, dislikedCategories]
   );
 
   // Initial load
@@ -169,12 +213,26 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
     }
   }, []); // Run on mount
 
-  // Auto-fetch more cards when running low
+  // Auto-fetch more cards in advance when queue is running low (<= 3 cards left)
   useEffect(() => {
-    if (deck.length > 0 && deck.length <= 2 && !isLoading && !isFetchingRef.current) {
+    if (
+      deck.length > 0 &&
+      deck.length <= 3 &&
+      !isLoading &&
+      !isFetchingRef.current
+    ) {
       void fetchMoreRecommendations(false);
     }
   }, [deck.length, isLoading, fetchMoreRecommendations]);
+
+  const handleResetSeen = () => {
+    localStorage.removeItem(STORAGE_KEY_SEEN);
+    setSeenTitles(new Set());
+    seenTitlesRef.current = new Set();
+    setDeck([]);
+    setHistory([]);
+    void fetchMoreRecommendations(true);
+  };
 
   const currentCard = deck[0];
   const nextCard = deck[1];
@@ -397,6 +455,17 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
                 <Bookmark className="w-4 h-4 text-[#f59e0b]" />
                 <span>Öppna Watchlist ({watchlist.length})</span>
               </button>
+
+              {seenTitles.size > 0 && (
+                <button
+                  type="button"
+                  onClick={handleResetSeen}
+                  className="w-full min-h-[38px] rounded-2xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.06] text-zinc-400 hover:text-zinc-200 font-medium text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer mt-1"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>Börja om från början ({seenTitles.size} swipade titlar)</span>
+                </button>
+              )}
             </div>
           </div>
         ) : (

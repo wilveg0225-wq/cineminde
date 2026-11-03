@@ -21,6 +21,15 @@ export interface TmdbMovieEnrichment {
   swedishProviders?: SwedishWatchProviders;
   tmdbGenreIds?: number[];
   tmdbGenres?: string[];
+  seasonCount?: number;
+}
+
+export interface SeasonRating {
+  seasonNumber: number; // 1, 2, 3...
+  rating: number; // 1 to 5
+  liked: boolean; // true = Gillade, false = Gillade inte
+  tags: string[]; // Kvalitetstaggar för säsongen
+  thoughts?: string; // Egna tankar om säsongen
 }
 
 export interface WatchedMovie {
@@ -29,7 +38,7 @@ export interface WatchedMovie {
   originalTitle?: string;
   year?: string;
   mediaType?: "movie" | "tv";
-  rating: number; // 1 to 5
+  rating: number; // 1 to 5 (helhetsbetyg eller genomsnitt)
   liked: boolean; // true = Gillade, false = Gillade inte
   tags: string[];
   thoughts?: string;
@@ -40,6 +49,8 @@ export interface WatchedMovie {
   swedishProviders?: SwedishWatchProviders;
   tmdbGenreIds?: number[];
   tmdbGenres?: string[];
+  seasonCount?: number;
+  seasons?: SeasonRating[]; // Säsongsbetyg om serien bedömts per säsong
 }
 
 export interface MovieRecommendation {
@@ -49,6 +60,7 @@ export interface MovieRecommendation {
   year: string;
   runtime: string;
   mediaType?: "movie" | "tv";
+  seasonCount?: number;
   matchPercentage: number;
   whyYouWillLikeIt: string;
   vibeTags: string[];
@@ -217,6 +229,344 @@ export function mapTmdbGenreIdsToNames(genreIds?: number[]): string[] {
     }
   }
   return names;
+}
+
+export const KNOWN_SERIES_SEASON_COUNTS: Record<string, number> = {
+  // Miniserier / 1 säsong
+  chernobyl: 1,
+  shogun: 1,
+  "shōgun": 1,
+  "band of brothers": 1,
+  "mare of easttown": 1,
+  "the queen's gambit": 1,
+  "queens gambit": 1,
+  kalifat: 1,
+  "cyberpunk: edgerunners": 1,
+  "cyberpunk edgerunners": 1,
+  watchmen: 1,
+  "station eleven": 1,
+  dopesick: 1,
+  "sharp objects": 1,
+  "when they see us": 1,
+  "the night of": 1,
+  unbelievable: 1,
+  maid: 1,
+  beef: 1,
+  ripley: 1,
+  "baby reindeer": 1,
+  "normal people": 1,
+  "the last of us": 1,
+  fallout: 1,
+  andor: 1,
+
+  // 2 säsonger
+  severance: 2,
+  arcane: 2,
+  mindhunter: 2,
+  "snabba cash": 2,
+  "house of the dragon": 2,
+  "the white lotus": 2,
+  "white lotus": 2,
+  fleabag: 2,
+  "squid game": 2,
+  silo: 2,
+  "good omens": 2,
+  "the flight attendant": 2,
+  loki: 2,
+
+  // 3 säsonger
+  dark: 3,
+  "the bear": 3,
+  from: 3,
+  backstrom: 3,
+  "bäckström": 3,
+  "ted lasso": 3,
+  narcos: 3,
+  "narcos: mexico": 3,
+  "narcos mexico": 3,
+  "the mandalorian": 3,
+  mandalorian: 3,
+  "twin peaks": 3,
+  deadwood: 3,
+
+  // 4 säsonger
+  succession: 4,
+  "the boys": 4,
+  "true detective": 4,
+  "stranger things": 4,
+  bron: 4,
+  broen: 4,
+  "bron / broen": 4,
+  ozark: 4,
+  barry: 4,
+  sherlock: 4,
+  "slow horses": 4,
+  "jack ryan": 4,
+
+  // 5 säsonger
+  "breaking bad": 5,
+  "the wire": 5,
+  fargo: 5,
+  luther: 5,
+  yellowstone: 5,
+  "boardwalk empire": 5,
+  "prison break": 5,
+  gomorrah: 5,
+  gomorra: 5,
+  "person of interest": 5,
+  gotham: 5,
+
+  // 6 säsonger
+  "the sopranos": 6,
+  sopranos: 6,
+  "better call saul": 6,
+  "peaky blinders": 6,
+  "the crown": 6,
+  lost: 6,
+  vikings: 6,
+  "silicon valley": 6,
+  "downton abbey": 6,
+  community: 6,
+  "schitt's creek": 6,
+  "schitts creek": 6,
+  justified: 6,
+  "the americans": 6,
+  "black mirror": 6,
+
+  // 7 säsonger
+  "the shield": 7,
+  "mad men": 7,
+  "the rookie": 7,
+  "sons of anarchy": 7,
+  "parks and recreation": 7,
+  "billions": 7,
+  "workin' moms": 7,
+
+  // 8 säsonger
+  "game of thrones": 8,
+  dexter: 8,
+  solsidan: 8,
+  homeland: 8,
+  "brooklyn nine-nine": 8,
+  "brooklyn 99": 8,
+  house: 8,
+  "house m.d.": 8,
+  arrow: 8,
+
+  // 9 säsonger
+  suits: 9,
+  "the office": 9,
+  seinfeld: 9,
+  "peep show": 9,
+
+  // 10+ säsonger
+  friends: 10,
+  "morden i sandhamn": 10,
+  "modern family": 11,
+  "the walking dead": 11,
+  "curb your enthusiasm": 12,
+  "the big bang theory": 12,
+  supernatural: 15,
+  "it's always sunny in philadelphia": 16,
+  "its always sunny in philadelphia": 16,
+  "greys anatomy": 20,
+  "grey's anatomy": 20,
+  "the simpsons": 36,
+  "south park": 26,
+};
+
+export function getSeriesSeasonCount(title: string): number {
+  const norm = normalizeMovieTitle(title);
+  if (KNOWN_SERIES_SEASON_COUNTS[norm]) {
+    return KNOWN_SERIES_SEASON_COUNTS[norm];
+  }
+  for (const [key, count] of Object.entries(KNOWN_SERIES_SEASON_COUNTS)) {
+    const keyNorm = normalizeMovieTitle(key);
+    if (norm === keyNorm || (norm.length >= 4 && norm.includes(keyNorm))) {
+      return count;
+    }
+  }
+  return 1;
+}
+
+export const COMMON_DISLIKED_CATEGORIES: readonly string[] = [
+  "Skräck",
+  "Romantik",
+  "Musikal",
+  "Sci-Fi",
+  "Fantasy",
+  "Komedi",
+  "Animerat",
+  "Action",
+  "Krigsfilm",
+  "Dokumentär",
+  "Reality",
+  "Splatter & Våld",
+];
+
+export const DISLIKED_CATEGORY_TMDB_MAP: Record<string, number[]> = {
+  skräck: [27],
+  horror: [27],
+  romantik: [10749],
+  romance: [10749],
+  kärlek: [10749],
+  komedi: [35],
+  comedy: [35],
+  action: [28, 10759],
+  "sci-fi": [878, 10765],
+  scifi: [878, 10765],
+  "science fiction": [878, 10765],
+  fantasy: [14, 10765],
+  animerat: [16],
+  animation: [16],
+  tecknat: [16],
+  anime: [16],
+  krim: [80],
+  kriminal: [80],
+  deckare: [80, 9648],
+  mysterium: [9648],
+  mystery: [9648],
+  thriller: [53],
+  drama: [18],
+  dokumentär: [99],
+  documentary: [99],
+  musikal: [10402],
+  musik: [10402],
+  musical: [10402],
+  krig: [10752, 10768],
+  krigsfilm: [10752, 10768],
+  war: [10752, 10768],
+  western: [37],
+  familj: [10751, 10762],
+  familjefilm: [10751, 10762],
+  barnfilm: [10751, 10762],
+  reality: [10764],
+  äventyr: [12, 10759],
+  adventure: [12, 10759],
+  historia: [36],
+  historiskt: [36],
+};
+
+export function getDislikedGenreIds(category: string): number[] {
+  const norm = category.trim().toLowerCase();
+  if (DISLIKED_CATEGORY_TMDB_MAP[norm]) {
+    return DISLIKED_CATEGORY_TMDB_MAP[norm];
+  }
+  for (const [key, ids] of Object.entries(DISLIKED_CATEGORY_TMDB_MAP)) {
+    if (norm.includes(key) || key.includes(norm)) {
+      return ids;
+    }
+  }
+  return [];
+}
+
+export function isMovieMatchingDislikedCategories(
+  movie: {
+    title?: string;
+    originalTitle?: string;
+    tmdbGenreIds?: number[];
+    tmdbGenres?: string[];
+    vibeTags?: string[];
+    matchingContents?: string[];
+    matchingMoods?: string[];
+    hookSwedish?: string;
+    whyYouWillLikeIt?: string;
+  },
+  dislikedCategories: string[]
+): boolean {
+  if (!Array.isArray(dislikedCategories) || dislikedCategories.length === 0) {
+    return false;
+  }
+
+  let genreIds = movie.tmdbGenreIds;
+  let genres = movie.tmdbGenres;
+  if ((!genreIds || genreIds.length === 0) && movie.title) {
+    const meta = lookupCuratedTmdbMovie(movie.originalTitle || movie.title);
+    if (meta.tmdbGenreIds && meta.tmdbGenreIds.length > 0) {
+      genreIds = meta.tmdbGenreIds;
+    }
+    if (meta.tmdbGenres && meta.tmdbGenres.length > 0) {
+      genres = meta.tmdbGenres;
+    }
+  }
+
+  const genreIdSet = new Set((genreIds || []).map(Number));
+  const genresLower = (genres || []).map((g) => g.toLowerCase());
+  const vibeTagsLower = (movie.vibeTags || []).map((t) => t.toLowerCase());
+  const matchingContentsLower = (movie.matchingContents || []).map((c) =>
+    c.toLowerCase()
+  );
+  const matchingMoodsLower = (movie.matchingMoods || []).map((m) =>
+    m.toLowerCase()
+  );
+  const textPool = [
+    movie.title || "",
+    movie.originalTitle || "",
+    movie.hookSwedish || "",
+    movie.whyYouWillLikeIt || "",
+    ...genresLower,
+    ...vibeTagsLower,
+    ...matchingContentsLower,
+    ...matchingMoodsLower,
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  for (const rawCat of dislikedCategories) {
+    const cat = rawCat.trim().toLowerCase();
+    if (!cat) continue;
+
+    // 1. TMDB Genre IDs
+    const mappedIds = getDislikedGenreIds(cat);
+    if (mappedIds.length > 0 && mappedIds.some((id) => genreIdSet.has(id))) {
+      return true;
+    }
+
+    // 2. TMDB Genres names
+    if (genresLower.some((g) => g.includes(cat) || cat.includes(g))) {
+      return true;
+    }
+
+    // 3. Vibe tags & matching contents
+    if (vibeTagsLower.some((t) => t.includes(cat) || cat.includes(t))) {
+      return true;
+    }
+    if (matchingContentsLower.some((c) => c.includes(cat) || cat.includes(c))) {
+      return true;
+    }
+
+    // 4. Keyword in textPool (min 3 chars)
+    if (cat.length >= 3) {
+      const cleanWord = cat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`(^|\\W)${cleanWord}($|\\W)`, "i");
+      if (regex.test(textPool) || textPool.includes(cat)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+export function filterOutDislikedCategories<
+  T extends {
+    title?: string;
+    originalTitle?: string;
+    tmdbGenreIds?: number[];
+    tmdbGenres?: string[];
+    vibeTags?: string[];
+    matchingContents?: string[];
+    matchingMoods?: string[];
+    hookSwedish?: string;
+    whyYouWillLikeIt?: string;
+  }
+>(movies: T[], dislikedCategories: string[]): T[] {
+  if (!Array.isArray(dislikedCategories) || dislikedCategories.length === 0) {
+    return movies;
+  }
+  return movies.filter(
+    (movie) => !isMovieMatchingDislikedCategories(movie, dislikedCategories)
+  );
 }
 
 interface TmdbCategoryRule {
@@ -722,6 +1072,7 @@ export interface ExportedAppData {
   watchedMovies: WatchedMovie[];
   watchlist: MovieRecommendation[];
   tasteProfileSummary: string;
+  dislikedCategories?: string[];
 }
 
 export const GENRE_GROUPS: readonly ExpandableChipGroup[] = [
@@ -2188,14 +2539,33 @@ export function lookupCuratedTmdbMovie(
       normalizeMovieTitle(m.title) === norm ||
       normalizeMovieTitle(m.originalTitle) === norm
   );
-  if (exact) return exact;
+  if (exact) {
+    return {
+      ...exact,
+      seasonCount:
+        exact.seasonCount ||
+        (exact.mediaType === "tv" ? getSeriesSeasonCount(exact.title) : undefined),
+    };
+  }
 
   const partial = CURATED_TMDB_MOVIES.find(
     (m) =>
       (norm.length >= 3 && normalizeMovieTitle(m.title).includes(norm)) ||
       (norm.length >= 3 && norm.includes(normalizeMovieTitle(m.title)))
   );
-  if (partial) return partial;
+  if (partial) {
+    return {
+      ...partial,
+      seasonCount:
+        partial.seasonCount ||
+        (partial.mediaType === "tv"
+          ? getSeriesSeasonCount(partial.title)
+          : undefined),
+    };
+  }
+
+  // Check if title is in known TV series dictionary
+  const knownSeasonCount = KNOWN_SERIES_SEASON_COUNTS[norm];
 
   // Deterministic fallback for unknown titles when live TMDB key isn't active
   let hash = 0;
@@ -2209,6 +2579,8 @@ export function lookupCuratedTmdbMovie(
     title: title.trim(),
     originalTitle: title.trim(),
     year: year || "2021",
+    mediaType: knownSeasonCount ? "tv" : undefined,
+    seasonCount: knownSeasonCount,
     voteAverage: Math.round(voteAverage * 10) / 10,
     swedishProviders: { type: "none", providers: [] },
   };
@@ -2338,9 +2710,15 @@ export function isMovieExcluded(
 export function filterDuplicateRecommendations(
   recommendations: MovieRecommendation[],
   watchedMovies: WatchedMovie[],
-  watchlist: MovieRecommendation[]
+  watchlist: MovieRecommendation[],
+  previousTitles: string[] = []
 ): MovieRecommendation[] {
   const seen = new Set<string>();
+  const previousNorms = new Set(
+    (previousTitles || [])
+      .map((t) => normalizeMovieTitle(t))
+      .filter(Boolean)
+  );
   const result: MovieRecommendation[] = [];
 
   for (const rec of recommendations) {
@@ -2352,6 +2730,15 @@ export function filterDuplicateRecommendations(
     }
     const normTitle = normalizeMovieTitle(rec.title);
     const normOrig = normalizeMovieTitle(rec.originalTitle);
+
+    // Strictly skip movies already presented to the user
+    if (
+      (normTitle && previousNorms.has(normTitle)) ||
+      (normOrig && previousNorms.has(normOrig))
+    ) {
+      continue;
+    }
+
     if (
       (normTitle && seen.has(normTitle)) ||
       (normOrig && seen.has(normOrig))
@@ -2383,7 +2770,15 @@ export function calculateTasteStats(watchedMovies: WatchedMovie[]): TasteStats {
 
   const tagCounts = new Map<string, number>();
   for (const movie of watchedMovies) {
-    for (const tag of movie.tags || []) {
+    const effectiveTags = new Set(movie.tags || []);
+    if (Array.isArray(movie.seasons)) {
+      for (const s of movie.seasons) {
+        for (const stag of s.tags || []) {
+          effectiveTags.add(stag);
+        }
+      }
+    }
+    for (const tag of effectiveTags) {
       tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
     }
   }
@@ -2449,6 +2844,29 @@ export function validateAndParseImportData(jsonString: string): {
         posterPath: m.posterPath ? String(m.posterPath) : undefined,
         tmdbRating: m.tmdbRating ? Number(m.tmdbRating) : undefined,
         swedishProviders: m.swedishProviders,
+        mediaType: m.mediaType === "tv" ? "tv" : m.mediaType === "movie" ? "movie" : undefined,
+        seasonCount: m.seasonCount ? Number(m.seasonCount) : undefined,
+        seasons: Array.isArray(m.seasons)
+          ? m.seasons
+              .filter(
+                (s: unknown) =>
+                  Boolean(
+                    s &&
+                      typeof s === "object" &&
+                      typeof (s as SeasonRating).seasonNumber === "number"
+                  )
+              )
+              .map((s: Partial<SeasonRating>) => ({
+                seasonNumber: Number(s.seasonNumber),
+                rating: Math.min(5, Math.max(1, Number(s.rating) || 3)),
+                liked:
+                  typeof s.liked === "boolean"
+                    ? s.liked
+                    : (Number(s.rating) || 3) >= 3,
+                tags: Array.isArray(s.tags) ? s.tags.map(String) : [],
+                thoughts: s.thoughts ? String(s.thoughts) : undefined,
+              }))
+          : undefined,
       }));
 
     const watchlist: MovieRecommendation[] = parsed.watchlist
@@ -2468,12 +2886,20 @@ export function validateAndParseImportData(jsonString: string): {
         posterPath: m.posterPath ? String(m.posterPath) : undefined,
         tmdbRating: m.tmdbRating ? Number(m.tmdbRating) : undefined,
         swedishProviders: m.swedishProviders,
+        mediaType: m.mediaType === "tv" ? "tv" : m.mediaType === "movie" ? "movie" : undefined,
       }));
 
     const tasteProfileSummary =
       typeof parsed.tasteProfileSummary === "string"
         ? parsed.tasteProfileSummary
         : DEFAULT_TASTE_PROFILE;
+
+    const dislikedCategories = Array.isArray(parsed.dislikedCategories)
+      ? parsed.dislikedCategories
+          .map(String)
+          .map((s: string) => s.trim())
+          .filter((s: string) => s.length > 0)
+      : undefined;
 
     return {
       valid: true,
@@ -2483,6 +2909,9 @@ export function validateAndParseImportData(jsonString: string): {
         watchedMovies,
         watchlist,
         tasteProfileSummary,
+        ...(dislikedCategories && dislikedCategories.length > 0
+          ? { dislikedCategories }
+          : {}),
       },
     };
   } catch {
@@ -2498,7 +2927,8 @@ export function buildRecommendationSystemPrompt(
   watchlist: MovieRecommendation[],
   tasteProfileSummary: string,
   preferences: EveningPreferences,
-  previousTitles: string[] = []
+  previousTitles: string[] = [],
+  dislikedCategories: string[] = []
 ): string {
   const excludedTitles = [
     ...watchedMovies.map((m) =>
@@ -2513,18 +2943,62 @@ export function buildRecommendationSystemPrompt(
     ),
   ];
 
-  const lovedMovies = watchedMovies.filter((m) => m.rating >= 4 && m.liked !== false);
-  const dislikedMovies = watchedMovies.filter((m) => m.rating <= 2 || m.liked === false);
-  const neutralMovies = watchedMovies.filter(
+  interface PromptWatchedEntry {
+    title: string;
+    rating: number;
+    liked: boolean;
+    tags: string[];
+    thoughts?: string;
+  }
+
+  const promptEntries: PromptWatchedEntry[] = [];
+  let hasSeasonSpecificRatings = false;
+
+  for (const m of watchedMovies) {
+    if (m.seasons && m.seasons.length > 0) {
+      hasSeasonSpecificRatings = true;
+      for (const s of m.seasons) {
+        promptEntries.push({
+          title: `${m.title} (Säsong ${s.seasonNumber})`,
+          rating: s.rating,
+          liked: s.liked,
+          tags: s.tags && s.tags.length > 0 ? s.tags : m.tags,
+          thoughts:
+            s.thoughts ||
+            (m.thoughts ? `[Seriehelhet: ${m.thoughts}]` : undefined),
+        });
+      }
+    } else {
+      promptEntries.push({
+        title: m.title,
+        rating: m.rating,
+        liked: m.liked,
+        tags: m.tags,
+        thoughts: m.thoughts,
+      });
+    }
+  }
+
+  const lovedMovies = promptEntries.filter(
+    (m) => m.rating >= 4 && m.liked !== false
+  );
+  const dislikedMovies = promptEntries.filter(
+    (m) => m.rating <= 2 || m.liked === false
+  );
+  const neutralMovies = promptEntries.filter(
     (m) => m.rating === 3 && m.liked !== false
   );
 
-  const formatMovieLine = (m: WatchedMovie) =>
+  const formatMovieLine = (m: PromptWatchedEntry) =>
     `- "${m.title}" (${m.rating}/5 stjärnor, ${
       m.liked ? "Gillade" : "Gillade inte"
-    }) | Kvaliteter: [${m.tags.join(", ")}]${
+    }) | Kvaliteter: [${(m.tags || []).join(", ")}]${
       m.thoughts ? ` | Egna tankar: "${m.thoughts}"` : ""
     }`;
+
+  const seasonInstruction = hasSeasonSpecificRatings
+    ? `\n\nVIKTIG REGEL FÖR SÄSONGSBETYG PÅ SERIER: Användaren har angett olika betyg på olika säsonger av samma serie (t.ex. en säsong med högt betyg och en annan med lågt betyg). Slå ALDRIG ihop serien till ett platt medelbetyg! Du MÅSTE analysera exakt vad som gjorde favoritsäsongen fantastisk (t.ex. skarp regi, intimt mysterium, spännande tempo) och vad som gjorde den svagare säsongen ogillad (t.ex. seg handling, förlorad riktning), och styra rekommendationerna därefter.`
+    : "";
 
   const watchedSummary =
     watchedMovies.length > 0
@@ -2540,13 +3014,13 @@ export function buildRecommendationSystemPrompt(
                 .join("\n")}`
             : "",
           dislikedMovies.length > 0
-            ? `OGILLADE FILMER (1–2 stjärnor / Gillade inte – UNDVIK filmer med denna ton, kliché eller svaghet även inom kvällens kategorier!):\n${dislikedMovies
+            ? `OGILLADE FILMER & SÄSONGER (1–2 stjärnor / Gillade inte – UNDVIK filmer/serier med denna ton, kliché eller svaghet även inom kvällens kategorier!):\n${dislikedMovies
                 .map(formatMovieLine)
                 .join("\n")}`
             : "",
         ]
           .filter(Boolean)
-          .join("\n\n")
+          .join("\n\n") + seasonInstruction
       : "Inga loggade filmer ännu.";
 
   const hasTvLengthChip = (preferences.moods || []).some((m) =>
@@ -2644,7 +3118,14 @@ PRICKSÄKER MATCHNING & HANTERING AV SVÅRA/SMALA KATEGORIER:
 REGEL FÖR REDAN SEDDA TITLAR OCH WATCHLIST:
 Användarens Sedda-lista och Watchlist:
 ${excludedTitles.length > 0 ? excludedTitles.join(", ") : "Inga exkluderade titlar."}
-${previousTitles.length > 0 ? `Undvik även dessa titlar som nyss visades (om inte användaren tydligt söker exakt en av dem): ${previousTitles.join(", ")}` : ""}
+${
+  previousTitles.length > 0
+    ? `TOTALFÖRBUD MOT TIDIGARE VISADE / SWIPADE TITLAR:
+Användaren har nyligen visats och bläddrat förbi följande titlar (totalt ${previousTitles.length} st):
+${previousTitles.slice(-50).join(", ")}
+TOTALFÖRBUD: Du får ALDRIG rekommendera någon av dessa titlar igen! Föreslå uteslutande helt NYA titlar som användaren inte har sett än.`
+    : ""
+}
 - NORMALFALL: Du får ALDRIG rekommendera någon titel från listan över sedda eller watchlist ovan! Sätt "isExactPinpointMatch": false på alla 5 titlar.
 - UNDANTAG ENDAST VID DETEKTIV-SÖKNING: Endast om användaren i Fritext beskriver en specifik handling, eller har kombinerat minst 4 mycket smala detaljkategorier som uppenbart pekar på en enda specifik titel som hen försöker komma på namnet på, får du ta med en redan sedd titel som #1 med "isExactPinpointMatch": true. Vid vanliga kategorival (som 1–3 genrer/teman) är det TOTALFÖRBJUDET att föreslå en redan sedd titel!
 
@@ -2666,6 +3147,15 @@ ${watchedSummary}
 
 ANVÄNDARENS SMAKPROFIL (STYR TON, STIL OCH KVALITET INOM KVÄLLENS KATEGORIER):
 ${tasteProfileSummary || "Ingen sammanfattning skapad ännu."}
+${
+  dislikedCategories.length > 0
+    ? `
+ANVÄNDARENS OGILLADE KATEGORIER / GENRER (TOTALFÖRBUD MOT OGILLADE KATEGORIER – 100% STRIKT KRAV):
+Användaren har i sin smakprofil uttryckligen angett att hen ogillar och INTE vill ha förslag inom följande kategorier:
+[${dislikedCategories.join(", ")}]
+- TOTALFÖRBUD: Du får ALDRIG rekommendera filmer eller serier som tillhör, har inslag av eller huvudsakligen kretsar kring någon av dessa ogillade kategorier!`
+    : ""
+}
 
 SVARSFORMAT (MÅSTE VARA EN GILTIG JSON-ARRAY MED EXAKT 5 OBJEKT – INGA TRAILING COMMAS):
 Exempel på exakt fältstruktur för varje objekt i JSON-arrayen:
@@ -3295,7 +3785,9 @@ const FALLBACK_CATALOG: CatalogEntry[] = [
 export function generateSmartFallbackRecommendations(
   watchedMovies: WatchedMovie[],
   watchlist: MovieRecommendation[],
-  preferences: EveningPreferences
+  preferences: EveningPreferences,
+  dislikedCategories: string[] = [],
+  previousTitles: string[] = []
 ): MovieRecommendation[] {
   const stats = calculateTasteStats(watchedMovies);
   const topUserTags = new Set(stats.topTags.slice(0, 4).map((t) => t.tag));
@@ -3314,8 +3806,20 @@ export function generateSmartFallbackRecommendations(
     ? preferences.streamingProviders
     : [];
 
+  const previousNorms = new Set(
+    (previousTitles || []).map((t) => normalizeMovieTitle(t)).filter(Boolean)
+  );
+
+  const isAlreadyShown = (entry: { title: string; originalTitle?: string }) => {
+    const t1 = normalizeMovieTitle(entry.title);
+    const t2 = entry.originalTitle ? normalizeMovieTitle(entry.originalTitle) : "";
+    return previousNorms.has(t1) || (t2 && previousNorms.has(t2));
+  };
+
   const baseCandidates = FALLBACK_CATALOG.filter((entry) => {
     if (isMovieExcluded(entry, watchedMovies, watchlist)) return false;
+    if (isAlreadyShown(entry)) return false;
+    if (isMovieMatchingDislikedCategories(entry, dislikedCategories)) return false;
     const entryType = entry.mediaType || "movie";
     if (mediaPref === "movie" && entryType !== "movie") return false;
     if (mediaPref === "tv" && entryType !== "tv") return false;
@@ -3511,22 +4015,44 @@ export function generateSmartFallbackRecommendations(
 }
 
 export function generateSmartFallbackTasteProfile(
-  watchedMovies: WatchedMovie[]
+  watchedMovies: WatchedMovie[],
+  dislikedCategories: string[] = []
 ): string {
   if (watchedMovies.length === 0) {
+    if (dislikedCategories.length > 0) {
+      return `Du har angett att du vill undvika ${dislikedCategories.join(
+        ", "
+      )}. Logga några sedda favoriter under fliken 'Sedda' så bygger CineMinde upp din personliga smakprofil!`;
+    }
     return "Du har inte loggat några sedda filmer ännu. Lägg till några favoriter under fliken 'Sedda' och bocka i vad du gillade bäst med dem, så bygger CineMinde upp din personliga smakprofil!";
   }
 
   const stats = calculateTasteStats(watchedMovies);
   const topTagNames = stats.topTags.slice(0, 3).map((t) => t.tag.toLowerCase());
-  const favMovies = watchedMovies
-    .filter((m) => m.rating >= 4 && m.liked !== false)
-    .slice(0, 4)
-    .map((m) => m.title);
-  const dislikedMovies = watchedMovies
-    .filter((m) => m.rating <= 2 || m.liked === false)
-    .slice(0, 2)
-    .map((m) => m.title);
+
+  const favItems: string[] = [];
+  const dislikedItems: string[] = [];
+
+  for (const m of watchedMovies) {
+    if (m.seasons && m.seasons.length > 0) {
+      for (const s of m.seasons) {
+        if (s.rating >= 4 && s.liked !== false) {
+          favItems.push(`${m.title} (Säsong ${s.seasonNumber})`);
+        } else if (s.rating <= 2 || s.liked === false) {
+          dislikedItems.push(`${m.title} (Säsong ${s.seasonNumber})`);
+        }
+      }
+    } else {
+      if (m.rating >= 4 && m.liked !== false) {
+        favItems.push(m.title);
+      } else if (m.rating <= 2 || m.liked === false) {
+        dislikedItems.push(m.title);
+      }
+    }
+  }
+
+  const favMovies = favItems.slice(0, 4);
+  const dislikedMovies = dislikedItems.slice(0, 2);
 
   const favText =
     favMovies.length > 0
@@ -3538,10 +4064,15 @@ export function generateSmartFallbackTasteProfile(
       ? `Du värdesätter framför allt ${topTagNames.join(", ")}, vilket går som en röd tråd genom dina favoriter.`
       : `Du uppskattar välregisserade berättelser med genomtänkt tempo och stark karaktärsnärvaro.`;
 
+  const explicitDislikes =
+    dislikedCategories.length > 0
+      ? `Du undviker dessutom aktivt kategorier som ${dislikedCategories.join(", ")}.`
+      : "";
+
   const dislikeText =
     dislikedMovies.length > 0
-      ? `Samtidigt visar dina lägre betyg på filmer som ${dislikedMovies.join(" och ")} vad du föredrar att undvika när kvällens film väljs.`
-      : `Din profil hjälper CineMinde att lyfta fram filmer som matchar din kvalitetsnivå oavsett vilken genre eller stämning du väljer för kvällen.`;
+      ? `Samtidigt visar dina lägre betyg på filmer som ${dislikedMovies.join(" och ")} vad du föredrar att undvika när kvällens film väljs.${explicitDislikes ? " " + explicitDislikes : ""}`
+      : explicitDislikes || `Din profil hjälper CineMinde att lyfta fram filmer som matchar din kvalitetsnivå oavsett vilken genre eller stämning du väljer för kvällen.`;
 
   return `${favText} ${tagText} ${dislikeText}`;
 }

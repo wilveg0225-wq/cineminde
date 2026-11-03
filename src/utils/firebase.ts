@@ -80,6 +80,7 @@ export interface CloudUserData {
   watchedMovies: WatchedMovie[];
   watchlist: MovieRecommendation[];
   tasteProfileSummary: string;
+  dislikedCategories?: string[];
   updatedAt: string;
 }
 
@@ -165,11 +166,15 @@ export async function loadOrInitializeUserCloudData(
         typeof data.tasteProfileSummary === "string" && data.tasteProfileSummary
           ? data.tasteProfileSummary
           : fallbackData.tasteProfileSummary,
+      dislikedCategories: Array.isArray(data.dislikedCategories)
+        ? data.dislikedCategories
+        : fallbackData.dislikedCategories || [],
       updatedAt: data.updatedAt || new Date().toISOString(),
     };
   } else {
     const initialPayload: CloudUserData = {
       ...fallbackData,
+      dislikedCategories: fallbackData.dislikedCategories || [],
       updatedAt: new Date().toISOString(),
     };
     await setDoc(userDocRef, initialPayload, { merge: true });
@@ -189,6 +194,7 @@ export async function saveUserCloudData(
       watchedMovies: data.watchedMovies,
       watchlist: data.watchlist,
       tasteProfileSummary: data.tasteProfileSummary,
+      dislikedCategories: data.dislikedCategories || [],
       updatedAt: new Date().toISOString(),
     })
   );
@@ -214,6 +220,9 @@ export function subscribeToUserCloudData(
         watchedMovies: data.watchedMovies,
         watchlist: data.watchlist,
         tasteProfileSummary: data.tasteProfileSummary,
+        dislikedCategories: Array.isArray(data.dislikedCategories)
+          ? data.dislikedCategories
+          : [],
         updatedAt: data.updatedAt || "",
       });
     }

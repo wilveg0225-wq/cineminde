@@ -115,6 +115,7 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
       posterPath: hit.posterPath,
       tmdbRating: hit.voteAverage,
       swedishProviders: hit.swedishProviders,
+      seasonCount: hit.seasonCount,
     });
   };
 
@@ -147,6 +148,7 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
       posterPath: meta.posterPath,
       tmdbRating: meta.voteAverage,
       swedishProviders: meta.swedishProviders,
+      seasonCount: meta.seasonCount,
     });
   };
 
@@ -393,10 +395,12 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
                               initialLiked: movie.liked,
                               initialTags: movie.tags,
                               initialThoughts: movie.thoughts,
+                              initialSeasons: movie.seasons,
                               tmdbId: movie.tmdbId,
                               posterPath: movie.posterPath,
                               tmdbRating: movie.tmdbRating,
                               swedishProviders: movie.swedishProviders,
+                              seasonCount: movie.seasonCount,
                             })
                           }
                           aria-label={`Redigera ${movie.title}`}
@@ -416,7 +420,7 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
                     </div>
 
                     {/* User Rating & Sentiment */}
-                    <div className="flex items-center gap-2.5 mt-2">
+                    <div className="flex items-center gap-2.5 mt-2 flex-wrap">
                       <div
                         className="flex items-center gap-0.5"
                         aria-label={`Betyg ${movie.rating} av 5 stjärnor`}
@@ -448,9 +452,61 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
                           </>
                         )}
                       </span>
+                      {movie.seasons && movie.seasons.length > 0 && (
+                        <span className="text-[11px] font-medium text-[#f59e0b] bg-[#f59e0b]/10 border border-[#f59e0b]/20 px-2 py-0.5 rounded-md">
+                          {movie.seasons.length}{" "}
+                          {movie.seasons.length === 1
+                            ? "säsong betygsatt"
+                            : "säsonger betygsatta"}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
+
+                {/* Season ratings breakdown if series has rated seasons */}
+                {movie.seasons && movie.seasons.length > 0 && (
+                  <div className="pt-2.5 border-t border-white/[0.06] space-y-2">
+                    <p className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">
+                      Säsonger & omdömen:
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {movie.seasons
+                        .slice()
+                        .sort((a, b) => a.seasonNumber - b.seasonNumber)
+                        .map((s) => (
+                          <div
+                            key={s.seasonNumber}
+                            className="bg-[#0a0a0c] border border-white/[0.07] rounded-xl p-2.5 flex flex-col gap-1"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-semibold text-white">
+                                Säsong {s.seasonNumber}
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="flex items-center text-xs font-mono-num font-semibold text-[#f59e0b]">
+                                  {s.rating}★
+                                </span>
+                                <span className="text-[11px] text-zinc-400">
+                                  {s.liked ? "Gillade" : "Gillade inte"}
+                                </span>
+                              </div>
+                            </div>
+                            {s.tags && s.tags.length > 0 && (
+                              <p className="text-[11px] text-zinc-400 truncate">
+                                {s.tags.join(" · ")}
+                              </p>
+                            )}
+                            {s.thoughts && (
+                              <p className="text-[11px] text-zinc-400 italic line-clamp-2">
+                                "{s.thoughts}"
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Selected Quality Tags */}
                 {movie.tags && movie.tags.length > 0 && (

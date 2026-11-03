@@ -37,7 +37,21 @@ const STORAGE_KEYS = {
   TASTE_PROFILE: "tasteProfileSummary",
   RECOMMENDATIONS: "cineminde_recommendations",
   STREAMING_PROVIDERS: "cineminde_streaming_providers",
+  DISLIKED_CATEGORIES: "cineminde_disliked_categories",
 };
+
+function loadInitialDislikedCategories(): string[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.DISLIKED_CATEGORIES);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.map(String).filter((s) => s.trim().length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
 
 function loadInitialStreamingProviders(): string[] {
   try {
@@ -125,7 +139,8 @@ function loadInitialTasteProfile(): string {
 
 function loadInitialRecommendations(
   watched: WatchedMovie[],
-  watchlist: MovieRecommendation[]
+  watchlist: MovieRecommendation[],
+  dislikedCategories: string[] = []
 ): MovieRecommendation[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.RECOMMENDATIONS);
@@ -138,13 +153,18 @@ function loadInitialRecommendations(
   } catch {
     // Fallback below
   }
-  return generateSmartFallbackRecommendations(watched, watchlist, {
-    moods: [],
-    genres: [],
-    contents: [],
-    frameworks: [],
-    customText: "",
-  });
+  return generateSmartFallbackRecommendations(
+    watched,
+    watchlist,
+    {
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "",
+    },
+    dislikedCategories
+  );
 }
 
 export default function App() {
@@ -156,8 +176,11 @@ export default function App() {
   const [tasteProfileSummary, setTasteProfileSummary] = useState<string>(
     loadInitialTasteProfile
   );
+  const [dislikedCategories, setDislikedCategories] = useState<string[]>(
+    loadInitialDislikedCategories
+  );
   const [recommendations, setRecommendations] = useState<MovieRecommendation[]>(
-    () => loadInitialRecommendations(watchedMovies, watchlist)
+    () => loadInitialRecommendations(watchedMovies, watchlist, loadInitialDislikedCategories())
   );
 
   const [preferences, setPreferences] = useState<EveningPreferences>(() => ({
@@ -185,6 +208,8 @@ export default function App() {
   watchlistRef.current = watchlist;
   const tasteProfileSummaryRef = useRef(tasteProfileSummary);
   tasteProfileSummaryRef.current = tasteProfileSummary;
+  const dislikedCategoriesRef = useRef(dislikedCategories);
+  dislikedCategoriesRef.current = dislikedCategories;
 
   // Firebase Auth & Real-time Firestore Cloud Sync
   useEffect(() => {
@@ -208,11 +233,15 @@ export default function App() {
           watchedMovies: watchedMoviesRef.current,
           watchlist: watchlistRef.current,
           tasteProfileSummary: tasteProfileSummaryRef.current,
+          dislikedCategories: dislikedCategoriesRef.current,
         });
         skipNextCloudSaveRef.current = true;
         setWatchedMovies(enrichWatchedWithCurated(cloudData.watchedMovies));
         setWatchlist(enrichRecsWithCurated(cloudData.watchlist));
         setTasteProfileSummary(cloudData.tasteProfileSummary);
+        if (Array.isArray(cloudData.dislikedCategories)) {
+          setDislikedCategories(cloudData.dislikedCategories);
+        }
         isCloudHydratedRef.current = true;
 
         unsubscribeSnapshot = subscribeToUserCloudData(user.uid, (liveData) => {
@@ -220,6 +249,9 @@ export default function App() {
           setWatchedMovies(enrichWatchedWithCurated(liveData.watchedMovies));
           setWatchlist(enrichRecsWithCurated(liveData.watchlist));
           setTasteProfileSummary(liveData.tasteProfileSummary);
+          if (Array.isArray(liveData.dislikedCategories)) {
+            setDislikedCategories(liveData.dislikedCategories);
+          }
         });
       } catch {
         // Fallback to local state if Firestore is not yet enabled
@@ -243,8 +275,9 @@ export default function App() {
       watchedMovies,
       watchlist,
       tasteProfileSummary,
+      dislikedCategories,
     });
-  }, [watchedMovies, watchlist, tasteProfileSummary, currentUser]);
+  }, [watchedMovies, watchlist, tasteProfileSummary, dislikedCategories, currentUser]);
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: "instant" });
@@ -257,6 +290,17 @@ export default function App() {
       // Ignore storage quota errors
     }
   }, [watchedMovies]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEYS.DISLIKED_CATEGORIES,
+        JSON.stringify(dislikedCategories)
+      );
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [dislikedCategories]);
 
   useEffect(() => {
     try {
@@ -445,6 +489,7 @@ export default function App() {
           watchlist,
           tasteProfileSummary,
           preferences,
+          dislikedCategories,
           previousTitles: recommendations.map((r) => r.title),
         }),
       });
@@ -466,7 +511,8 @@ export default function App() {
           const fallback = generateSmartFallbackRecommendations(
             watchedMovies,
             watchlist,
-            preferences
+            preferences,
+            dislikedCategories
           );
           setRecommendations(fallback);
         }
@@ -474,7 +520,8 @@ export default function App() {
         const fallback = generateSmartFallbackRecommendations(
           watchedMovies,
           watchlist,
-          preferences
+          preferences,
+          dislikedCategories
         );
         setRecommendations(fallback);
       }
@@ -482,7 +529,8 @@ export default function App() {
       const fallback = generateSmartFallbackRecommendations(
         watchedMovies,
         watchlist,
-        preferences
+        preferences,
+        dislikedCategories
       );
       setRecommendations(fallback);
     } finally {
@@ -562,6 +610,7 @@ export default function App() {
       posterPath: movie.posterPath,
       tmdbRating: movie.tmdbRating,
       swedishProviders: movie.swedishProviders,
+      seasonCount: movie.seasonCount,
     });
   };
 
@@ -579,16 +628,23 @@ export default function App() {
       posterPath: movie.posterPath,
       tmdbRating: movie.tmdbRating,
       swedishProviders: movie.swedishProviders,
+      seasonCount: movie.seasonCount,
     });
   };
 
-  const refreshTasteProfileInBackground = async (movies: WatchedMovie[]) => {
+  const refreshTasteProfileInBackground = async (
+    movies: WatchedMovie[],
+    dislikes: string[] = dislikedCategories
+  ) => {
     setIsUpdatingProfile(true);
     try {
       const response = await fetch("/api/taste-profile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ watchedMovies: movies }),
+        body: JSON.stringify({
+          watchedMovies: movies,
+          dislikedCategories: dislikes,
+        }),
       });
 
       if (!response.ok) {
@@ -602,11 +658,37 @@ export default function App() {
         throw new Error("Tomt svar");
       }
     } catch {
-      const fallback = generateSmartFallbackTasteProfile(movies);
+      const fallback = generateSmartFallbackTasteProfile(movies, dislikes);
       setTasteProfileSummary(fallback);
     } finally {
       setIsUpdatingProfile(false);
     }
+  };
+
+  const handleAddDislikedCategory = (category: string) => {
+    const trimmed = category.trim();
+    if (!trimmed) return;
+    const exists = dislikedCategories.some(
+      (c) => c.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (exists) {
+      showToast(`"${trimmed}" finns redan bland dina ogillade kategorier.`);
+      return;
+    }
+    const formatted = trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+    const updated = [...dislikedCategories, formatted];
+    setDislikedCategories(updated);
+    showToast(`Kategorin "${formatted}" sållas nu bort från dina förslag.`);
+    void refreshTasteProfileInBackground(watchedMovies, updated);
+  };
+
+  const handleRemoveDislikedCategory = (category: string) => {
+    const updated = dislikedCategories.filter(
+      (c) => c.toLowerCase() !== category.trim().toLowerCase()
+    );
+    setDislikedCategories(updated);
+    showToast(`Kategorin "${category}" togs bort från ogillade.`);
+    void refreshTasteProfileInBackground(watchedMovies, updated);
   };
 
   const handleSaveWatchedMovie = (
@@ -786,6 +868,7 @@ export default function App() {
               watchedMovies={watchedMovies}
               watchlist={watchlist}
               tasteProfileSummary={tasteProfileSummary}
+              dislikedCategories={dislikedCategories}
               onAddToWatchlist={handleAddToWatchlist}
               onMarkAsWatched={handleOpenRateFromRecommendation}
               onGoToWatchlist={() => setActiveTab("watchlist")}
@@ -831,6 +914,9 @@ export default function App() {
               watchedMovies={watchedMovies}
               watchlist={watchlist}
               tasteProfileSummary={tasteProfileSummary}
+              dislikedCategories={dislikedCategories}
+              onAddDislikedCategory={handleAddDislikedCategory}
+              onRemoveDislikedCategory={handleRemoveDislikedCategory}
               isUpdatingProfile={isUpdatingProfile}
               currentUser={currentUser}
               onOpenAuthModal={() => setIsAuthModalOpen(true)}

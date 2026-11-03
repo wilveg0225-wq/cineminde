@@ -17,9 +17,15 @@ import {
   filterAndVerifyMoviesByTmdbCategories,
   verifyMovieAgainstTmdbCategories,
   lookupCuratedTmdbMovie,
+  isMovieMatchingDislikedCategories,
+  filterOutDislikedCategories,
+  getDislikedGenreIds,
+  buildRecommendationSystemPrompt,
   DEFAULT_WATCHED_MOVIES,
   WatchedMovie,
   MovieRecommendation,
+  getSeriesSeasonCount,
+  KNOWN_SERIES_SEASON_COUNTS,
 } from "./movieLogic";
 
 test("normalizeMovieTitle normalizes casing, accents, and punctuation", () => {
@@ -542,4 +548,402 @@ test("validateAndParseImportData caps extreme ratings and handles corrupted item
 
   assert.equal(parsed.data?.watchlist.length, 1);
   assert.equal(parsed.data?.watchlist[0].matchPercentage, 99); // capped at 99
+});
+
+test("isMovieMatchingDislikedCategories accurately detects movies matching disliked categories", () => {
+  // Horror movie (TMDB ID 27)
+  const horrorMovie = {
+    title: "Hereditary",
+    tmdbGenreIds: [27, 9648],
+    tmdbGenres: ["Skräck", "Mysterium"],
+    vibeTags: ["Obehaglig", "Krypande skräck"],
+  };
+
+  // Romance movie (TMDB ID 10749)
+  const romanceMovie = {
+    title: "La La Land",
+    tmdbGenreIds: [35, 18, 10749, 10402],
+    tmdbGenres: ["Komedi", "Drama", "Romantik", "Musik"],
+    vibeTags: ["Romantisk", "Musikalisk"],
+  };
+
+  // Sci-Fi / Action movie
+  const sciFiActionMovie = {
+    title: "The Matrix",
+    tmdbGenreIds: [28, 878],
+    tmdbGenres: ["Action", "Sci-Fi"],
+    vibeTags: ["Mind-bending", "Cyberpunk"],
+  };
+
+  // Check horror detection
+  assert.equal(isMovieMatchingDislikedCategories(horrorMovie, ["Skräck"]), true);
+  assert.equal(isMovieMatchingDislikedCategories(horrorMovie, ["Horror"]), true);
+  assert.equal(isMovieMatchingDislikedCategories(horrorMovie, ["Romantik"]), false);
+
+  // Check romance & musical detection
+  assert.equal(isMovieMatchingDislikedCategories(romanceMovie, ["Romantik"]), true);
+  assert.equal(isMovieMatchingDislikedCategories(romanceMovie, ["Musikal"]), true);
+  assert.equal(isMovieMatchingDislikedCategories(romanceMovie, ["Skräck"]), false);
+
+  // Check custom keyword in vibeTags or text
+  const zombieMovie = {
+    title: "28 Days Later",
+    tmdbGenreIds: [53],
+    tmdbGenres: ["Thriller"],
+    vibeTags: ["Zombies", "Postapokalyps"],
+  };
+  assert.equal(isMovieMatchingDislikedCategories(zombieMovie, ["Zombies"]), true);
+
+  // Filter out disliked categories
+  const pool = [horrorMovie, romanceMovie, sciFiActionMovie];
+  const withoutHorror = filterOutDislikedCategories(pool, ["Skräck"]);
+  assert.equal(withoutHorror.length, 2);
+  assert.equal(withoutHorror.some((m) => m.title === "Hereditary"), false);
+
+  const withoutHorrorAndRomance = filterOutDislikedCategories(pool, [
+    "Skräck",
+    "Romantik",
+  ]);
+  assert.equal(withoutHorrorAndRomance.length, 1);
+  assert.equal(withoutHorrorAndRomance[0].title, "The Matrix");
+});
+
+test("generateSmartFallbackRecommendations never suggests movies from disliked categories", () => {
+  const emptyPrefs = {
+    moods: [],
+    genres: [],
+    contents: [],
+    frameworks: [],
+    customText: "",
+  };
+
+  // When "Komedi" is disliked
+  const recsWithoutComedy = generateSmartFallbackRecommendations(
+    DEFAULT_WATCHED_MOVIES,
+    [],
+    emptyPrefs,
+    ["Komedi"]
+  );
+
+  assert.equal(recsWithoutComedy.length, 5);
+  for (const movie of recsWithoutComedy) {
+    const isComedy =
+      (movie.tmdbGenreIds || []).includes(35) ||
+      (movie.tmdbGenres || []).some((g) => g.toLowerCase().includes("komedi"));
+    assert.equal(
+      isComedy,
+      false,
+      `Film "${movie.title}" should not be a comedy when Komedi is disliked`
+    );
+  }
+
+  // When "Sci-Fi" is disliked
+  const recsWithoutSciFi = generateSmartFallbackRecommendations(
+    DEFAULT_WATCHED_MOVIES,
+    [],
+    emptyPrefs,
+    ["Sci-Fi"]
+  );
+
+  assert.equal(recsWithoutSciFi.length, 5);
+  for (const movie of recsWithoutSciFi) {
+    const isSciFi =
+      (movie.tmdbGenreIds || []).includes(878) ||
+      (movie.tmdbGenres || []).some((g) => g.toLowerCase().includes("sci-fi"));
+    assert.equal(
+      isSciFi,
+      false,
+      `Film "${movie.title}" should not be Sci-Fi when Sci-Fi is disliked`
+    );
+  }
+});
+
+test("buildRecommendationSystemPrompt and taste profile reflect disliked categories", () => {
+  const prompt = buildRecommendationSystemPrompt(
+    DEFAULT_WATCHED_MOVIES,
+    [],
+    "Gillar spänning.",
+    {
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "",
+    },
+    [],
+    ["Skräck", "Romantik"]
+  );
+
+  assert.match(prompt, /TOTALFÖRBUD MOT OGILLADE KATEGORIER/);
+  assert.match(prompt, /Skräck, Romantik/);
+
+  // Fallback taste profile
+  const profileWithDislikes = generateSmartFallbackTasteProfile(
+    DEFAULT_WATCHED_MOVIES,
+    ["Musikal", "Reality"]
+  );
+  assert.match(profileWithDislikes, /Musikal, Reality/);
+});
+
+test("validateAndParseImportData preserves dislikedCategories", () => {
+  const payload = JSON.stringify({
+    version: 1,
+    watchedMovies: [{ title: "Testfilm", rating: 4, liked: true, tags: ["Spännande"] }],
+    watchlist: [],
+    tasteProfileSummary: "Profil här",
+    dislikedCategories: ["Skräck", "Musikal", "   "],
+  });
+
+  const parsed = validateAndParseImportData(payload);
+  assert.equal(parsed.valid, true);
+  assert.deepEqual(parsed.data?.dislikedCategories, ["Skräck", "Musikal"]);
+});
+
+test("filterDuplicateRecommendations and fallbacks strictly eliminate previousTitles to prevent loops", () => {
+  const recommendations: MovieRecommendation[] = [
+    {
+      id: "1",
+      title: "Inception",
+      originalTitle: "Inception",
+      year: "2010",
+      runtime: "2 tim 28 min",
+      matchPercentage: 95,
+      whyYouWillLikeIt: "Briljant sci-fi.",
+      vibeTags: ["Mind-bending"],
+    },
+    {
+      id: "2",
+      title: "Interstellar",
+      originalTitle: "Interstellar",
+      year: "2014",
+      runtime: "2 tim 49 min",
+      matchPercentage: 94,
+      whyYouWillLikeIt: "Rymdäventyr.",
+      vibeTags: ["Rymden"],
+    },
+    {
+      id: "3",
+      title: "Dune",
+      originalTitle: "Dune",
+      year: "2021",
+      runtime: "2 tim 35 min",
+      matchPercentage: 92,
+      whyYouWillLikeIt: "Storslaget.",
+      vibeTags: ["Sci-Fi"],
+    },
+  ];
+
+  // User has already seen "Inception" in previous swipes
+  const previous = ["Inception"];
+  const clean = filterDuplicateRecommendations(
+    recommendations,
+    [],
+    [],
+    previous
+  );
+
+  assert.equal(clean.length, 2);
+  assert.equal(clean.some((m) => m.title === "Inception"), false);
+  assert.equal(clean[0].title, "Interstellar");
+  assert.equal(clean[1].title, "Dune");
+
+  // Verify that generateSmartFallbackRecommendations gives completely different movies
+  // when the first batch is passed in previousTitles
+  const emptyPrefs = {
+    moods: [],
+    genres: [],
+    contents: [],
+    frameworks: [],
+    customText: "",
+  };
+
+  const batch1 = generateSmartFallbackRecommendations(
+    DEFAULT_WATCHED_MOVIES,
+    [],
+    emptyPrefs,
+    [],
+    []
+  );
+  assert.equal(batch1.length, 5);
+  const batch1Titles = batch1.map((m) => m.title);
+
+  // Next batch excludes all titles in batch 1
+  const batch2 = generateSmartFallbackRecommendations(
+    DEFAULT_WATCHED_MOVIES,
+    [],
+    emptyPrefs,
+    [],
+    batch1Titles
+  );
+  assert.equal(batch2.length, 5);
+
+  // Zero overlap between batch 1 and batch 2
+  for (const m of batch2) {
+    assert.equal(
+      batch1Titles.includes(m.title),
+      false,
+      `Movie "${m.title}" from batch 1 was repeated in batch 2`
+    );
+  }
+});
+
+test("Season ratings: validateAndParseImportData parses seasons and mediaType", () => {
+  const json = JSON.stringify({
+    watchedMovies: [
+      {
+        id: "w1",
+        title: "True Detective",
+        mediaType: "tv",
+        rating: 4,
+        liked: true,
+        tags: ["Mästerverk"],
+        seasons: [
+          {
+            seasonNumber: 1,
+            rating: 5,
+            liked: true,
+            tags: ["Mästerverk", "Skådespeleriet / Dialogen"],
+            thoughts: "Bästa säsongen någonsin skapad.",
+          },
+          {
+            seasonNumber: 2,
+            rating: 2,
+            liked: false,
+            tags: ["Tappade tempo"],
+            thoughts: "Rörig handling.",
+          },
+        ],
+      },
+    ],
+    watchlist: [],
+  });
+
+  const res = validateAndParseImportData(json);
+  assert.equal(res.valid, true);
+  assert.equal(res.data?.watchedMovies.length, 1);
+  const movie = res.data!.watchedMovies[0];
+  assert.equal(movie.mediaType, "tv");
+  assert.equal(movie.seasons?.length, 2);
+  assert.equal(movie.seasons[0].seasonNumber, 1);
+  assert.equal(movie.seasons[0].rating, 5);
+  assert.equal(movie.seasons[0].liked, true);
+  assert.equal(movie.seasons[1].seasonNumber, 2);
+  assert.equal(movie.seasons[1].rating, 2);
+  assert.equal(movie.seasons[1].liked, false);
+});
+
+test("Season ratings: buildRecommendationSystemPrompt distinguishes different seasons and warns against lumping them together", () => {
+  const watched: WatchedMovie[] = [
+    {
+      id: "w1",
+      title: "True Detective",
+      mediaType: "tv",
+      rating: 4,
+      liked: true,
+      tags: ["Mästerverk"],
+      addedAt: "2026-10-01",
+      seasons: [
+        {
+          seasonNumber: 1,
+          rating: 5,
+          liked: true,
+          tags: ["Skådespeleriet / Dialogen", "Stämningen / Atmosfären"],
+          thoughts: "Fantastisk atmosfär och mysterium.",
+        },
+        {
+          seasonNumber: 2,
+          rating: 2,
+          liked: false,
+          tags: ["Svag story"],
+          thoughts: "Splittrad och tråkig.",
+        },
+      ],
+    },
+  ];
+
+  const prompt = buildRecommendationSystemPrompt(
+    watched,
+    [],
+    "Gillar täta mysterier",
+    { moods: [], contents: [], frameworks: [], customText: "" }
+  );
+
+  // Check that Season 1 appears in favorites
+  assert.ok(
+    prompt.includes('"True Detective (Säsong 1)" (5/5 stjärnor, Gillade)'),
+    "Prompt should list Season 1 under favorites"
+  );
+  // Check that Season 2 appears in disliked
+  assert.ok(
+    prompt.includes('"True Detective (Säsong 2)" (2/5 stjärnor, Gillade inte)'),
+    "Prompt should list Season 2 under disliked"
+  );
+  // Check that explicit instruction not to lump seasons together is included
+  assert.ok(
+    prompt.includes("VIKTIG REGEL FÖR SÄSONGSBETYG PÅ SERIER"),
+    "Prompt must instruct Gemini not to lump season ratings together"
+  );
+});
+
+test("Season ratings: generateSmartFallbackTasteProfile separates seasons into fav and disliked", () => {
+  const watched: WatchedMovie[] = [
+    {
+      id: "w1",
+      title: "Fargo",
+      mediaType: "tv",
+      rating: 4,
+      liked: true,
+      tags: ["Manuset / Storyn"],
+      addedAt: "2026-10-01",
+      seasons: [
+        {
+          seasonNumber: 1,
+          rating: 5,
+          liked: true,
+          tags: ["Manuset / Storyn"],
+        },
+        {
+          seasonNumber: 4,
+          rating: 2,
+          liked: false,
+          tags: [],
+        },
+      ],
+    },
+  ];
+
+  const summary = generateSmartFallbackTasteProfile(watched);
+  assert.ok(
+    summary.includes("Fargo (Säsong 1)"),
+    "Fallback summary should mention Fargo (Säsong 1) in favorites"
+  );
+  assert.ok(
+    summary.includes("Fargo (Säsong 4)"),
+    "Fallback summary should mention Fargo (Säsong 4) in dislikes"
+  );
+});
+
+test("Series season counts: getSeriesSeasonCount returns exact season counts for known series", () => {
+  assert.equal(getSeriesSeasonCount("Chernobyl"), 1);
+  assert.equal(getSeriesSeasonCount("Shōgun"), 1);
+  assert.equal(getSeriesSeasonCount("Severance"), 2);
+  assert.equal(getSeriesSeasonCount("Dark"), 3);
+  assert.equal(getSeriesSeasonCount("True Detective"), 4);
+  assert.equal(getSeriesSeasonCount("Breaking Bad"), 5);
+  assert.equal(getSeriesSeasonCount("The Sopranos"), 6);
+  assert.equal(getSeriesSeasonCount("Game of Thrones"), 8);
+  assert.equal(getSeriesSeasonCount("Friends"), 10);
+});
+
+test("lookupCuratedTmdbMovie identifies series mediaType and seasonCount", () => {
+  const td = lookupCuratedTmdbMovie("True Detective");
+  assert.equal(td.mediaType, "tv");
+  assert.equal(td.seasonCount, 4);
+
+  const bb = lookupCuratedTmdbMovie("Breaking Bad");
+  assert.equal(bb.mediaType, "tv");
+  assert.equal(bb.seasonCount, 5);
+
+  const movie = lookupCuratedTmdbMovie("Inception");
+  assert.notEqual(movie.mediaType, "tv");
 });

@@ -24,6 +24,11 @@ import {
   movieMatchesStreamingProviders,
   extractTmdbVerificationRules,
   normalizeMovieTitle,
+  filterOutDislikedCategories,
+  getDislikedGenreIds,
+  isMovieMatchingDislikedCategories,
+  getSeriesSeasonCount,
+  KNOWN_SERIES_SEASON_COUNTS,
 } from "./src/utils/movieLogic";
 
 dotenv.config();
@@ -151,7 +156,10 @@ async function discoverTmdbCandidates(
   preferences: EveningPreferences,
   selectedServices: string[],
   tmdbKey: string,
-  limit = 20
+  limit = 20,
+  dislikedCategories: string[] = [],
+  previousTitles: string[] = [],
+  startPage = 1
 ): Promise<MovieRecommendation[]> {
   try {
     const hasProviders = selectedServices.length > 0;
@@ -167,6 +175,23 @@ async function discoverTmdbCandidates(
 
     const { genreRules, minYear, maxYear } =
       extractTmdbVerificationRules(preferences);
+
+    const previousNorms = new Set(
+      (previousTitles || []).map((t) => normalizeMovieTitle(t)).filter(Boolean)
+    );
+
+    const dislikedGenreIds: number[] = [];
+    for (const cat of dislikedCategories) {
+      for (const id of getDislikedGenreIds(cat)) {
+        if (!dislikedGenreIds.includes(id)) {
+          dislikedGenreIds.push(id);
+        }
+      }
+    }
+    const withoutGenreParam =
+      dislikedGenreIds.length > 0
+        ? `&without_genres=${encodeURIComponent(dislikedGenreIds.join(","))}`
+        : "";
 
     let watchParam = "";
     if (hasProviders) {
@@ -191,6 +216,8 @@ async function discoverTmdbCandidates(
       10759, 16, 35, 80, 99, 18, 10751, 10762, 9648, 10763, 10764, 10765,
       10766, 10767, 10768, 37,
     ];
+
+    const initialPage = Math.max(1, Number(startPage) || 1);
 
     for (const mediaType of typesToQuery) {
       const validSet = new Set(
@@ -224,96 +251,136 @@ async function discoverTmdbCandidates(
       }
 
       const voteCountMin = hasProviders ? 25 : 100;
-      const url = `/discover/${mediaType}?language=sv-SE&sort_by=popularity.desc&vote_count.gte=${voteCountMin}${watchParam}${genreParam}${yearParam}`;
 
-      let data = (await fetchFromTmdbApi(url, tmdbKey)) as {
-        results?: Array<Record<string, unknown>>;
-      };
+      // Query across multiple pages if needed so we never run out of fresh titles
+      const maxPagesToFetch = 3;
+      for (let p = initialPage; p < initialPage + maxPagesToFetch; p++) {
+        if (discovered.length >= limit * 2) break;
 
-      // If strict combination yielded 0 hits and we had 3+ rules, relax to the first 2 rules
-      if (
-        (!data?.results || data.results.length === 0) &&
-        ruleTokens.length > 2
-      ) {
-        const relaxedParam = `&with_genres=${encodeURIComponent(
-          ruleTokens.slice(0, 2).join(",")
-        )}`;
-        const fallbackVoteCount = hasProviders ? 15 : 40;
-        const fallbackUrl = `/discover/${mediaType}?language=sv-SE&sort_by=popularity.desc&vote_count.gte=${fallbackVoteCount}${watchParam}${relaxedParam}${yearParam}`;
-        data = (await fetchFromTmdbApi(fallbackUrl, tmdbKey)) as {
-          results?: Array<Record<string, unknown>>;
-        };
-      }
+        const url = `/discover/${mediaType}?language=sv-SE&sort_by=popularity.desc&vote_count.gte=${voteCountMin}&page=${p}${watchParam}${genreParam}${withoutGenreParam}${yearParam}`;
 
-      const hits = data?.results || [];
-      for (const hit of hits) {
-        const title = String(hit.title || hit.name || "").trim();
-        const originalTitle = String(
-          hit.original_title || hit.original_name || title
-        ).trim();
-        const dateStr = String(hit.release_date || hit.first_air_date || "");
-        const year = dateStr ? dateStr.slice(0, 4) : "";
-        const rawGenreIds = Array.isArray(hit.genre_ids)
-          ? hit.genre_ids
-              .map(Number)
-              .filter((n) => !Number.isNaN(n) && n > 0)
-          : [];
-        const tmdbGenres = mapTmdbGenreIdsToNames(rawGenreIds);
-        const voteAverage =
-          typeof hit.vote_average === "number" && hit.vote_average > 0
-            ? Math.round(hit.vote_average * 10) / 10
-            : 7.8;
-        const posterPath = hit.poster_path
-          ? String(hit.poster_path)
-          : undefined;
-        const overview = String(hit.overview || "").trim();
+        let data: { results?: Array<Record<string, unknown>> } | null = null;
+        try {
+          data = (await fetchFromTmdbApi(url, tmdbKey)) as {
+            results?: Array<Record<string, unknown>>;
+          };
+        } catch {
+          continue;
+        }
 
-        const motivation =
-          overview.length > 30
-            ? overview
-            : hasProviders
-            ? `Topprankad och bekräftad titel på ${selectedServices.join(
-                ", "
-              )} i Sverige som matchar dina val och stämningar med högt betyg (${voteAverage}/10).`
-            : `Topprankad och hyllad titel som förenar dina valda genrer och kategorier med högt betyg (${voteAverage}/10).`;
+        // If strict combination yielded 0 hits and we had 3+ rules, relax to the first 2 rules
+        if (
+          (!data?.results || data.results.length === 0) &&
+          ruleTokens.length > 2
+        ) {
+          const relaxedParam = `&with_genres=${encodeURIComponent(
+            ruleTokens.slice(0, 2).join(",")
+          )}`;
+          const fallbackVoteCount = hasProviders ? 15 : 40;
+          const fallbackUrl = `/discover/${mediaType}?language=sv-SE&sort_by=popularity.desc&vote_count.gte=${fallbackVoteCount}&page=${p}${watchParam}${relaxedParam}${withoutGenreParam}${yearParam}`;
+          try {
+            data = (await fetchFromTmdbApi(fallbackUrl, tmdbKey)) as {
+              results?: Array<Record<string, unknown>>;
+            };
+          } catch {
+            continue;
+          }
+        }
 
-        const matchedProviders = hasProviders
-          ? selectedServices.map((name) => ({
-              provider_id: providerIds[0] || 8,
-              provider_name: name,
-            }))
-          : [];
+        const hits = data?.results || [];
+        for (const hit of hits) {
+          const title = String(hit.title || hit.name || "").trim();
+          const originalTitle = String(
+            hit.original_title || hit.original_name || title
+          ).trim();
 
-        discovered.push({
-          id: `tmdb-disc-${hit.id}`,
-          title,
-          originalTitle,
-          year: year || "2023",
-          mediaType,
-          runtime: mediaType === "tv" ? "TV-serie" : "Film",
-          matchPercentage: Math.min(
-            96,
-            Math.max(90, Math.round(86 + (voteAverage || 7.5)))
-          ),
-          whyYouWillLikeIt: motivation,
-          vibeTags: tmdbGenres.slice(0, 3),
-          tmdbId: Number(hit.id),
-          posterPath,
-          tmdbRating: voteAverage,
-          tmdbGenreIds: rawGenreIds,
-          tmdbGenres,
-          swedishProviders: {
-            type: hasProviders ? "flatrate" : "none",
-            providers: matchedProviders,
-          },
-        });
+          // Strictly skip titles that were already shown/swiped
+          const t1 = normalizeMovieTitle(title);
+          const t2 = originalTitle ? normalizeMovieTitle(originalTitle) : "";
+          if (
+            (t1 && previousNorms.has(t1)) ||
+            (t2 && previousNorms.has(t2))
+          ) {
+            continue;
+          }
+
+          const dateStr = String(hit.release_date || hit.first_air_date || "");
+          const year = dateStr ? dateStr.slice(0, 4) : "";
+          const rawGenreIds = Array.isArray(hit.genre_ids)
+            ? hit.genre_ids
+                .map(Number)
+                .filter((n) => !Number.isNaN(n) && n > 0)
+            : [];
+          const tmdbGenres = mapTmdbGenreIdsToNames(rawGenreIds);
+          const voteAverage =
+            typeof hit.vote_average === "number" && hit.vote_average > 0
+              ? Math.round(hit.vote_average * 10) / 10
+              : 7.8;
+          const posterPath = hit.poster_path
+            ? String(hit.poster_path)
+            : undefined;
+          const overview = String(hit.overview || "").trim();
+
+          const motivation =
+            overview.length > 30
+              ? overview
+              : hasProviders
+              ? `Topprankad och bekräftad titel på ${selectedServices.join(
+                  ", "
+                )} i Sverige som matchar dina val och stämningar med högt betyg (${voteAverage}/10).`
+              : `Topprankad och hyllad titel som förenar dina valda genrer och kategorier med högt betyg (${voteAverage}/10).`;
+
+          const matchedProviders = hasProviders
+            ? selectedServices.map((name) => ({
+                provider_id: providerIds[0] || 8,
+                provider_name: name,
+              }))
+            : [];
+
+          discovered.push({
+            id: `tmdb-disc-${hit.id}`,
+            title,
+            originalTitle,
+            year: year || "2023",
+            mediaType,
+            runtime: mediaType === "tv" ? "TV-serie" : "Film",
+            matchPercentage: Math.min(
+              96,
+              Math.max(90, Math.round(86 + (voteAverage || 7.5)))
+            ),
+            whyYouWillLikeIt: motivation,
+            vibeTags: tmdbGenres.slice(0, 3),
+            tmdbId: Number(hit.id),
+            posterPath,
+            tmdbRating: voteAverage,
+            tmdbGenreIds: rawGenreIds,
+            tmdbGenres,
+            swedishProviders: {
+              type: hasProviders ? "flatrate" : "none",
+              providers: matchedProviders,
+            },
+          });
+        }
       }
     }
 
-    const verifiedDiscovered = filterAndVerifyMoviesByTmdbCategories(
+    let verifiedDiscovered = filterAndVerifyMoviesByTmdbCategories(
       discovered,
       preferences
     );
+    if (dislikedCategories.length > 0) {
+      verifiedDiscovered = filterOutDislikedCategories(
+        verifiedDiscovered,
+        dislikedCategories
+      );
+    }
+    // Final check against previous titles
+    verifiedDiscovered = verifiedDiscovered.filter((m) => {
+      const t1 = normalizeMovieTitle(m.title);
+      const t2 = m.originalTitle ? normalizeMovieTitle(m.originalTitle) : "";
+      return !previousNorms.has(t1) && (!t2 || !previousNorms.has(t2));
+    });
+
     return verifiedDiscovered.slice(0, limit);
   } catch {
     return [];
@@ -419,6 +486,25 @@ async function enrichSingleMovieWithTmdb(
         ? mapTmdbGenreIdsToNames(tmdbGenreIds)
         : curated.tmdbGenres;
 
+    let seasonCount = curated.seasonCount;
+    if (resolvedType === "tv") {
+      seasonCount = getSeriesSeasonCount(hitTitle);
+      try {
+        const tvDetails = (await fetchFromTmdbApi(
+          `/tv/${tmdbId}?language=sv-SE`,
+          tmdbKey
+        )) as { number_of_seasons?: number };
+        if (
+          typeof tvDetails?.number_of_seasons === "number" &&
+          tvDetails.number_of_seasons > 0
+        ) {
+          seasonCount = tvDetails.number_of_seasons;
+        }
+      } catch {
+        // Keep seasonCount from getSeriesSeasonCount
+      }
+    }
+
     const result: TmdbMovieEnrichment = {
       tmdbId,
       title: hitTitle,
@@ -430,6 +516,7 @@ async function enrichSingleMovieWithTmdb(
       swedishProviders,
       tmdbGenreIds,
       tmdbGenres,
+      seasonCount,
     };
     tmdbEnrichCache.set(cacheKey, result);
     return result;
@@ -493,6 +580,9 @@ async function startServer() {
                       ? Math.round(hit.vote_average * 10) / 10
                       : curated.voteAverage,
                   swedishProviders: curated.swedishProviders,
+                  seasonCount: isTv
+                    ? curated.seasonCount || getSeriesSeasonCount(hitTitle)
+                    : undefined,
                 };
               });
             return res.json({ results });
@@ -506,6 +596,60 @@ async function startServer() {
       return res.json({ results: curatedResults });
     } catch {
       return res.json({ results: [] });
+    }
+  });
+
+  // TMDB Series Seasons Count Endpoint
+  app.get("/api/tmdb/series-seasons", async (req, res) => {
+    try {
+      const tmdbId = req.query.tmdbId ? Number(req.query.tmdbId) : null;
+      const title = String(req.query.title || "").trim();
+      const headerKey = req.header("x-tmdb-key");
+      const tmdbKey = getEffectiveTmdbKey(headerKey);
+
+      let count = getSeriesSeasonCount(title);
+
+      if (tmdbKey) {
+        try {
+          let targetId = tmdbId;
+          if (!targetId && title) {
+            const searchData = (await fetchFromTmdbApi(
+              `/search/tv?query=${encodeURIComponent(title)}&language=sv-SE`,
+              tmdbKey
+            )) as { results?: Array<{ id: number }> };
+            if (searchData?.results?.[0]?.id) {
+              targetId = Number(searchData.results[0].id);
+            }
+          }
+
+          if (targetId) {
+            const tvDetails = (await fetchFromTmdbApi(
+              `/tv/${targetId}?language=sv-SE`,
+              tmdbKey
+            )) as {
+              number_of_seasons?: number;
+              seasons?: Array<{ season_number: number }>;
+            };
+            if (
+              typeof tvDetails?.number_of_seasons === "number" &&
+              tvDetails.number_of_seasons > 0
+            ) {
+              count = tvDetails.number_of_seasons;
+            } else if (Array.isArray(tvDetails?.seasons)) {
+              const valid = tvDetails.seasons.filter((s) => s.season_number > 0);
+              if (valid.length > 0) {
+                count = valid.length;
+              }
+            }
+          }
+        } catch {
+          // Fallback to local count
+        }
+      }
+
+      return res.json({ seasonCount: Math.max(1, count) });
+    } catch {
+      return res.json({ seasonCount: 1 });
     }
   });
 
@@ -544,6 +688,7 @@ async function startServer() {
         },
         previousTitles = [],
         limit = 5,
+        dislikedCategories = [],
       } = req.body as {
         watchedMovies: WatchedMovie[];
         watchlist: MovieRecommendation[];
@@ -551,9 +696,14 @@ async function startServer() {
         preferences: EveningPreferences;
         previousTitles?: string[];
         limit?: number;
+        dislikedCategories?: string[];
       };
 
       const requestedLimit = Math.max(5, Math.min(15, Number(limit) || 5));
+      const requestPage = Math.max(
+        1,
+        Number(req.body.page) || Math.floor((previousTitles.length || 0) / 10) + 1
+      );
       const headerKey = req.header("x-tmdb-key");
       const tmdbKey = getEffectiveTmdbKey(headerKey);
       const ai = getGenAIClient();
@@ -573,7 +723,10 @@ async function startServer() {
           preferences,
           selectedServices,
           tmdbKey,
-          20
+          20,
+          dislikedCategories,
+          previousTitles,
+          requestPage
         );
       }
 
@@ -583,7 +736,8 @@ async function startServer() {
           watchlist,
           tasteProfileSummary,
           preferences,
-          previousTitles
+          previousTitles,
+          dislikedCategories
         );
 
         const sampleTitles = discoveredPool
@@ -613,6 +767,12 @@ async function startServer() {
             ? ` SAMLAD BEDÖMNING AV FLERA KATEGORIER (STRIKT OCH-LOGIK): Användaren har valt flera kategorier samtidigt: [${chosenCategoriesList.join(
                 ", "
               )}]. SAMTLIGA titlar MÅSTE förena ALLA dessa kategorier samtidigt! Föreslå ALDRIG en titel som bara matchar en av kategorierna (om användaren t.ex. valt både Animerat och Action får du ALDRIG föreslå filmer som Trolls eller Sing som saknar action, och ALDRIG spelfilmer utan animation).`
+            : ""
+        }${
+          dislikedCategories.length > 0
+            ? ` TOTALFÖRBUD MOT OGILLADE KATEGORIER: Användaren har i sin smakprofil uttryckligen angett att hen ogillar och INTE vill ha förslag inom följande kategorier: [${dislikedCategories.join(
+                ", "
+              )}]. Du får ALDRIG rekommendera filmer eller serier som tillhör eller huvudsakligen kretsar kring någon av dessa ogillade kategorier!`
             : ""
         }${
           selectedServices.length > 0
@@ -726,11 +886,12 @@ async function startServer() {
         }
       }
 
-      // Deduplicate against watchedMovies and watchlist
+      // Deduplicate against watchedMovies, watchlist, and previously shown titles
       let uniqueRecs = filterDuplicateRecommendations(
         recommendations,
         watchedMovies,
-        watchlist
+        watchlist,
+        previousTitles
       );
 
       // Ensure we have candidates, topping up from discovered pool if available
@@ -756,7 +917,9 @@ async function startServer() {
         const fallbacks = generateSmartFallbackRecommendations(
           watchedMovies,
           [...watchlist, ...uniqueRecs],
-          preferences
+          preferences,
+          dislikedCategories,
+          previousTitles
         );
         uniqueRecs = [...uniqueRecs, ...fallbacks].slice(0, candidateTargetCount);
       } else {
@@ -808,6 +971,14 @@ async function startServer() {
       let verifiedCandidates: MovieRecommendation[] =
         filterAndVerifyMoviesByTmdbCategories(enrichedCandidates, preferences);
 
+      // Step 1.5: Strictly filter out any candidates that match user's disliked categories
+      if (dislikedCategories.length > 0) {
+        verifiedCandidates = filterOutDislikedCategories(
+          verifiedCandidates,
+          dislikedCategories
+        );
+      }
+
       // Step 2: If streaming services are selected, strictly filter to those services
       if (selectedServices.length > 0) {
         verifiedCandidates = filterMoviesByStreamingServices(
@@ -831,10 +1002,16 @@ async function startServer() {
             const t2 = normalizeMovieTitle(d.originalTitle);
             return !existingTitles.has(t1) && !existingTitles.has(t2);
           });
-          const verifiedDiscovered = filterAndVerifyMoviesByTmdbCategories(
+          let verifiedDiscovered = filterAndVerifyMoviesByTmdbCategories(
             unusedDiscovered,
             preferences
           );
+          if (dislikedCategories.length > 0) {
+            verifiedDiscovered = filterOutDislikedCategories(
+              verifiedDiscovered,
+              dislikedCategories
+            );
+          }
           for (const cand of verifiedDiscovered) {
             if (verifiedCandidates.length >= requestedLimit) break;
             verifiedCandidates.push(cand);
@@ -849,12 +1026,21 @@ async function startServer() {
               { ...preferences, moods: [], frameworks: [] },
               selectedServices,
               tmdbKey,
-              20
+              20,
+              dislikedCategories,
+              previousTitles,
+              requestPage + 1
             );
-            const verifiedBroader = filterAndVerifyMoviesByTmdbCategories(
+            let verifiedBroader = filterAndVerifyMoviesByTmdbCategories(
               broaderPool,
               preferences
             );
+            if (dislikedCategories.length > 0) {
+              verifiedBroader = filterOutDislikedCategories(
+                verifiedBroader,
+                dislikedCategories
+              );
+            }
             const existingTitles = new Set([
               ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
               ...watchlist.map((m) => normalizeMovieTitle(m.title)),
@@ -880,7 +1066,9 @@ async function startServer() {
           const extraFallbacks = generateSmartFallbackRecommendations(
             watchedMovies,
             [...watchlist, ...verifiedCandidates],
-            preferences
+            preferences,
+            dislikedCategories,
+            previousTitles
           );
           const enrichedExtra = await Promise.all(
             extraFallbacks.map(async (rec) => {
@@ -923,6 +1111,12 @@ async function startServer() {
           );
           let verifiedExtra: MovieRecommendation[] =
             filterAndVerifyMoviesByTmdbCategories(enrichedExtra, preferences);
+          if (dislikedCategories.length > 0) {
+            verifiedExtra = filterOutDislikedCategories(
+              verifiedExtra,
+              dislikedCategories
+            );
+          }
           if (selectedServices.length > 0) {
             verifiedExtra = filterMoviesByStreamingServices(
               verifiedExtra,
@@ -932,7 +1126,8 @@ async function startServer() {
           verifiedCandidates = filterDuplicateRecommendations(
             [...verifiedCandidates, ...verifiedExtra],
             watchedMovies,
-            watchlist
+            watchlist,
+            previousTitles
           );
         }
       }
@@ -942,9 +1137,28 @@ async function startServer() {
         verifiedCandidates = generateSmartFallbackRecommendations(
           watchedMovies,
           watchlist,
-          preferences
+          preferences,
+          dislikedCategories,
+          previousTitles
         );
       }
+
+      if (dislikedCategories.length > 0) {
+        verifiedCandidates = filterOutDislikedCategories(
+          verifiedCandidates,
+          dislikedCategories
+        );
+      }
+
+      // Strict guarantee: never re-serve a movie present in previousTitles
+      const previousNorms = new Set(
+        (previousTitles || []).map((t) => normalizeMovieTitle(t)).filter(Boolean)
+      );
+      verifiedCandidates = verifiedCandidates.filter((m) => {
+        const t1 = normalizeMovieTitle(m.title);
+        const t2 = m.originalTitle ? normalizeMovieTitle(m.originalTitle) : "";
+        return !previousNorms.has(t1) && (!t2 || !previousNorms.has(t2));
+      });
 
       const finalRecs = verifiedCandidates.slice(0, requestedLimit);
 
@@ -958,36 +1172,55 @@ async function startServer() {
 
   app.post("/api/taste-profile", async (req, res) => {
     try {
-      const { watchedMovies = [] } = req.body as {
+      const { watchedMovies = [], dislikedCategories = [] } = req.body as {
         watchedMovies: WatchedMovie[];
+        dislikedCategories?: string[];
       };
 
       if (!Array.isArray(watchedMovies) || watchedMovies.length === 0) {
         return res.json({
-          summary: generateSmartFallbackTasteProfile([]),
+          summary: generateSmartFallbackTasteProfile([], dislikedCategories),
         });
       }
 
       const ai = getGenAIClient();
       if (ai) {
         const moviesText = watchedMovies
-          .map(
-            (m) =>
-              `- "${m.title}" (${m.rating}/5 stjärnor, ${
-                m.liked ? "Gillade" : "Gillade inte"
-              }): Taggar: [${m.tags.join(", ")}]${
-                m.thoughts ? ` | Tankar: "${m.thoughts}"` : ""
-              }`
-          )
+          .map((m) => {
+            if (m.seasons && m.seasons.length > 0) {
+              return m.seasons
+                .map(
+                  (s) =>
+                    `- "${m.title} (Säsong ${s.seasonNumber})" (${s.rating}/5 stjärnor, ${
+                      s.liked ? "Gillade" : "Gillade inte"
+                    }): Taggar: [${(s.tags || []).join(", ")}]${
+                      s.thoughts ? ` | Tankar: "${s.thoughts}"` : ""
+                    }`
+                )
+                .join("\n");
+            }
+            return `- "${m.title}" (${m.rating}/5 stjärnor, ${
+              m.liked ? "Gillade" : "Gillade inte"
+            }): Taggar: [${(m.tags || []).join(", ")}]${
+              m.thoughts ? ` | Tankar: "${m.thoughts}"` : ""
+            }`;
+          })
           .join("\n");
 
-        const prompt = `Analysera följande filmer och kvaliteter som användaren har sett och betygsatt:
-${moviesText}
+        const prompt = `Analysera följande filmer/serier och kvaliteter som användaren har sett och betygsatt:
+${moviesText}${
+          dislikedCategories.length > 0
+            ? `\n\nObservera även: Användaren har i sin smakprofil uttryckligen angett att hen ogillar och vill undvika följande kategorier: [${dislikedCategories.join(
+                ", "
+              )}].`
+            : ""
+        }
 
-Skriv en träffsäker, personlig sammanfattning på svenska (3–4 meningar, direkt tilltal "Du...") av användarens unika filmsmak:
-1. Vilka tydliga mönster ser du i filmerna användaren älskar (4–5 stjärnor) och de kvaliteter som lyfts fram?
+Skriv en träffsäker, personlig sammanfattning på svenska (3–4 meningar, direkt tilltal "Du...") av användarens unika smak för film och serier:
+1. Vilka tydliga mönster ser du i verken användaren älskar (4–5 stjärnor) och de kvaliteter som lyfts fram?
 2. Vad söker användaren i regi, ton, tempo och känsla?
-3. Om det finns filmer med lågt betyg (1–2 stjärnor / Gillade inte), nämn tydligt vilken typ av stil, klichéer eller svagheter användaren ogillar och vill undvika.
+3. Om det finns titlar med lågt betyg (1–2 stjärnor / Gillade inte) eller uttryckligen ogillade kategorier, nämn tydligt vilken typ av stil, klichéer eller element användaren ogillar och vill undvika.
+4. OBSERVERA SÄSONGSBETYG: Om användaren har gett olika betyg på olika säsonger av samma serie (t.ex. Säsong 1 med 5 stjärnor och Säsong 2 med 2 stjärnor), behandla dem som separata omdömen och slå ALDRIG ihop dem till ett medelvärde. Fånga vad som gjorde favoritsäsongen stark kontra vad som brast i den svagare säsongen.
 Svara ENDAST med ett JSON-objekt på formatet: {"summary": "Din personliga sammanfattning här..."}`;
 
         try {
@@ -1038,7 +1271,10 @@ Svara ENDAST med ett JSON-objekt på formatet: {"summary": "Din personliga samma
         }
       }
 
-      const fallbackSummary = generateSmartFallbackTasteProfile(watchedMovies);
+      const fallbackSummary = generateSmartFallbackTasteProfile(
+        watchedMovies,
+        dislikedCategories
+      );
       return res.json({ summary: fallbackSummary });
     } catch {
       res.status(500).json({
