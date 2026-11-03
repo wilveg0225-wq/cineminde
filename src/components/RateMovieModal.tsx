@@ -4,7 +4,6 @@ import {
   ThumbsUp,
   ThumbsDown,
   X,
-  Check,
   Tv,
   Plus,
   Layers,
@@ -690,21 +689,12 @@ export const RateMovieModal: React.FC<RateMovieModalProps> = ({
                         type="button"
                         onClick={() => toggleSeasonTag(tag)}
                         aria-pressed={isSelected}
-                        className={`min-h-[48px] px-2.5 py-2 rounded-xl text-xs font-medium flex items-center justify-start gap-2 transition-colors cursor-pointer text-left ${
+                        className={`min-h-[48px] px-3 py-2.5 rounded-xl text-xs font-medium flex items-center justify-center text-center transition-colors cursor-pointer ${
                           isSelected
-                            ? "bg-[#e11d48] text-white border border-[#e11d48] shadow-sm"
+                            ? "bg-[#e11d48] text-white border border-[#e11d48] shadow-sm font-semibold"
                             : "bg-[#0a0a0c] text-zinc-300 border border-white/[0.08] hover:border-white/[0.2]"
                         }`}
                       >
-                        <span
-                          className={`w-4 h-4 rounded-md flex items-center justify-center shrink-0 border transition-colors ${
-                            isSelected
-                              ? "bg-white/20 border-white text-white"
-                              : "border-white/20 bg-white/[0.03] text-transparent"
-                          }`}
-                        >
-                          <Check className="w-3 h-3 text-white" />
-                        </span>
                         <span className="leading-snug">{tag}</span>
                       </button>
                     );
@@ -821,21 +811,12 @@ export const RateMovieModal: React.FC<RateMovieModalProps> = ({
                         type="button"
                         onClick={() => toggleWholeTag(tag)}
                         aria-pressed={isSelected}
-                        className={`min-h-[48px] px-2.5 py-2 rounded-xl text-xs font-medium flex items-center justify-start gap-2 transition-colors cursor-pointer text-left ${
+                        className={`min-h-[48px] px-3 py-2.5 rounded-xl text-xs font-medium flex items-center justify-center text-center transition-colors cursor-pointer ${
                           isSelected
-                            ? "bg-[#e11d48] text-white border border-[#e11d48] shadow-sm"
+                            ? "bg-[#e11d48] text-white border border-[#e11d48] shadow-sm font-semibold"
                             : "bg-[#0a0a0c] text-zinc-300 border border-white/[0.08] hover:border-white/[0.2]"
                         }`}
                       >
-                        <span
-                          className={`w-4 h-4 rounded-md flex items-center justify-center shrink-0 border transition-colors ${
-                            isSelected
-                              ? "bg-white/20 border-white text-white"
-                              : "border-white/20 bg-white/[0.03] text-transparent"
-                          }`}
-                        >
-                          <Check className="w-3 h-3 text-white" />
-                        </span>
                         <span className="leading-snug">{tag}</span>
                       </button>
                     );

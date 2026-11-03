@@ -35,6 +35,18 @@ interface RecommendedTabProps {
 }
 
 const STORAGE_KEY_SEEN = "cineminde_recommended_seen_titles";
+const STORAGE_KEY_DECK = "cineminde_recommended_deck";
+
+function loadStoredDeck(): MovieRecommendation[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DECK);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 function loadStoredSeenTitles(): Set<string> {
   try {
@@ -58,7 +70,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
   onMarkAsWatched,
   onGoToWatchlist,
 }) => {
-  const [deck, setDeck] = useState<MovieRecommendation[]>([]);
+  const [deck, setDeck] = useState<MovieRecommendation[]>(loadStoredDeck);
   const [history, setHistory] = useState<{
     movie: MovieRecommendation;
     action: "like" | "skip";
@@ -71,6 +83,38 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
   // Keep ref synchronized to always read the freshest seen set inside callbacks
   const seenTitlesRef = useRef(seenTitles);
   seenTitlesRef.current = seenTitles;
+
+  // Persist deck so user picks up right where they left off without restarting
+  useEffect(() => {
+    try {
+      if (deck.length > 0) {
+        localStorage.setItem(STORAGE_KEY_DECK, JSON.stringify(deck));
+      } else {
+        localStorage.removeItem(STORAGE_KEY_DECK);
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }, [deck]);
+
+  // Clean up any cards in deck that were marked as watched or added to watchlist elsewhere
+  useEffect(() => {
+    if (deck.length === 0) return;
+    const excluded = new Set([
+      ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
+      ...watchlist.map((m) => normalizeMovieTitle(m.title)),
+    ]);
+    setDeck((prev) => {
+      const filtered = prev.filter((card) => {
+        const norm = normalizeMovieTitle(card.title);
+        const origNorm = card.originalTitle
+          ? normalizeMovieTitle(card.originalTitle)
+          : "";
+        return !excluded.has(norm) && (!origNorm || !excluded.has(origNorm));
+      });
+      return filtered.length === prev.length ? prev : filtered;
+    });
+  }, [watchedMovies, watchlist]);
 
   // Persist seen titles to localStorage so swiped movies are never repeated across sessions
   useEffect(() => {
@@ -176,7 +220,18 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
         }
 
         if (filtered.length > 0) {
-          setDeck((prev) => (isInitial ? filtered : [...prev, ...filtered]));
+          setDeck((prev) => {
+            if (prev.length > 0) {
+              const existing = new Set(
+                prev.map((c) => normalizeMovieTitle(c.title))
+              );
+              const newItems = filtered.filter(
+                (c) => !existing.has(normalizeMovieTitle(c.title))
+              );
+              return [...prev, ...newItems];
+            }
+            return filtered;
+          });
 
           // Track newly introduced titles in seenTitles
           setSeenTitles((prev) => {
@@ -227,6 +282,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
 
   const handleResetSeen = () => {
     localStorage.removeItem(STORAGE_KEY_SEEN);
+    localStorage.removeItem(STORAGE_KEY_DECK);
     setSeenTitles(new Set());
     seenTitlesRef.current = new Set();
     setDeck([]);

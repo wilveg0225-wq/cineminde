@@ -4009,7 +4009,15 @@ export function generateSmartFallbackRecommendations(
     };
   });
 
-  scored.sort((a, b) => b.matchPercentage - a.matchPercentage);
+  scored.sort((a, b) => {
+    const diff = b.matchPercentage - a.matchPercentage;
+    if (diff !== 0) return diff;
+    // Tie-breaker: vary candidate ordering so fallback recommendations don't always start with the exact same 5 titles
+    return (
+      Math.sin(a.title.length * 31 + Number(a.year || 0)) -
+      Math.sin(b.title.length * 31 + Number(b.year || 0))
+    );
+  });
   const tmdbVerified = filterAndVerifyMoviesByTmdbCategories(scored, preferences);
   return tmdbVerified.slice(0, 5);
 }

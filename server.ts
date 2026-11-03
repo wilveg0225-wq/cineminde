@@ -159,7 +159,8 @@ async function discoverTmdbCandidates(
   limit = 20,
   dislikedCategories: string[] = [],
   previousTitles: string[] = [],
-  startPage = 1
+  startPage = 1,
+  watchedMovies: WatchedMovie[] = []
 ): Promise<MovieRecommendation[]> {
   try {
     const hasProviders = selectedServices.length > 0;
@@ -232,6 +233,29 @@ async function discoverTmdbCandidates(
         );
         if (matchingIds.length > 0) {
           ruleTokens.push(matchingIds.slice(0, 2).join("|"));
+        }
+      }
+
+      // If no specific evening genres were chosen (e.g. taste profile mode in "För dig"),
+      // derive target genres from the user's loved movies (rated >= 4 and liked)
+      if (ruleTokens.length === 0 && watchedMovies.length > 0) {
+        const loved = watchedMovies.filter(
+          (m) => m.rating >= 4 && m.liked !== false
+        );
+        const sourceMovies = loved.length > 0 ? loved : watchedMovies;
+        const genreCounts: Record<number, number> = {};
+        for (const m of sourceMovies) {
+          for (const gid of m.tmdbGenreIds || []) {
+            if (validSet.has(gid) && !dislikedGenreIds.includes(gid)) {
+              genreCounts[gid] = (genreCounts[gid] || 0) + 1;
+            }
+          }
+        }
+        const topGids = Object.entries(genreCounts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([id]) => Number(id));
+        if (topGids.length > 0) {
+          ruleTokens.push(topGids.slice(0, 3).join("|"));
         }
       }
 
@@ -726,7 +750,8 @@ async function startServer() {
           20,
           dislikedCategories,
           previousTitles,
-          requestPage
+          requestPage,
+          watchedMovies
         );
       }
 
@@ -740,10 +765,13 @@ async function startServer() {
           dislikedCategories
         );
 
-        const sampleTitles = discoveredPool
-          .slice(0, 8)
-          .map((d) => `"${d.title}" (${d.year})`)
-          .join(", ");
+        const sampleTitles =
+          selectedServices.length > 0
+            ? discoveredPool
+                .slice(0, 8)
+                .map((d) => `"${d.title}" (${d.year})`)
+                .join(", ")
+            : "";
 
         const isTasteProfileOnly =
           (preferences.moods || []).length === 0 &&
@@ -760,7 +788,8 @@ async function startServer() {
 
         const userPrompt = `Ta fram ${candidateTargetCount} skräddarsydda rekommendationer för användaren. ${
           isTasteProfileOnly
-            ? `HÅRT FOKUS PÅ SMAKPROFIL: Rekommendera titlar uteslutande baserat på användarens unika smakprofil, högt betygsatta favoriter och undvik det hen ogillar. Välj både mästerliga filmer och högklassiga serier som är perfekta träffar för denna persons filmsmak.`
+            ? `HÅRT FOKUS PÅ PERSONLIG SMAKPROFIL: Rekommendera titlar uteslutande baserat på användarens unika smakprofil, högt betygsatta favoriter och undvik det hen ogillar.
+VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest förutsägbara mainstream-klassikerna (som The Dark Knight, Inception, Interstellar, Gladiator, Fight Club eller Pulp Fiction) som nästan alla filmintresserade redan har sett. Gräv djupare! Ge användaren en inspirerande, varierad och personlig mix av högklassiga filmer och serier – både hyllade mästerverk, moderna pärlor och dolda guldkorn – som fångar exakt den regi, ton, atmosfär, nerv och tematik som användaren älskar i sina 4- och 5-stjärniga betyg!`
             : `Alla ${candidateTargetCount} titlar MÅSTE 100% matcha användarens valda kategorier, genrer, innehåll och stämning under KVÄLLENS VAL.`
         }${
           chosenCategoriesList.length > 1
