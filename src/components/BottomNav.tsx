@@ -25,8 +25,8 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   }[] = [
     {
       id: "recommended",
-      label: "Rekommenderat",
-      subtitle: "För dig",
+      label: "För dig",
+      subtitle: "Rekommendationer",
       icon: Compass,
     },
     {
@@ -51,8 +51,8 @@ export const BottomNav: React.FC<BottomNavProps> = ({
     },
     {
       id: "profile",
-      label: "Smakprofil",
-      subtitle: "Insikter",
+      label: "Profil",
+      subtitle: "Smakprofil & konto",
       icon: BrainCircuit,
     },
   ];
@@ -72,7 +72,8 @@ export const BottomNav: React.FC<BottomNavProps> = ({
               type="button"
               onClick={() => onSelectTab(item.id)}
               aria-current={isActive ? "page" : undefined}
-              className={`relative flex flex-col items-center justify-center min-h-[48px] rounded-xl transition-colors cursor-pointer select-none ${
+              title={item.subtitle}
+              className={`relative flex flex-col items-center justify-center min-h-[48px] rounded-xl transition-colors cursor-pointer select-none px-0.5 ${
                 isActive
                   ? "text-[#e11d48]"
                   : "text-zinc-400 hover:text-zinc-200"
@@ -86,18 +87,14 @@ export const BottomNav: React.FC<BottomNavProps> = ({
                 />
                 {typeof item.badge === "number" && item.badge > 0 && (
                   <span
-                    className={`ml-1 text-[10px] font-mono-num font-semibold px-1 rounded ${
-                      isActive
-                        ? "text-[#f59e0b]"
-                        : "text-zinc-400"
-                    }`}
+                    className="absolute -top-1.5 -right-2.5 min-w-[15px] h-[15px] px-1 rounded-full bg-amber-500 text-black text-[9px] font-bold font-mono-num flex items-center justify-center shadow-sm"
                   >
-                    {item.badge}
+                    {item.badge > 99 ? "99+" : item.badge}
                   </span>
                 )}
               </div>
               <span
-                className={`text-[11px] leading-tight mt-1 whitespace-nowrap shrink-0 ${
+                className={`text-[10.5px] sm:text-[11px] leading-tight mt-1 truncate max-w-full text-center ${
                   isActive ? "font-semibold text-[#f4f4f6]" : "font-medium"
                 }`}
               >

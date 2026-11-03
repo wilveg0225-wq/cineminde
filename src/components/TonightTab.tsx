@@ -56,7 +56,7 @@ const FILTER_CATEGORIES: {
   },
   {
     key: "frameworks",
-    label: "Miljö & Era",
+    label: "Miljö/Era",
     subtitle: "Välj plats, historisk epok eller utgivningsår med [+]",
     groups: SETTING_GROUPS,
     accent: "amber",

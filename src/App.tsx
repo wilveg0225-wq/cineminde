@@ -820,34 +820,28 @@ export default function App() {
       <div className="max-w-md mx-auto px-4 pt-safe-top">
         {/* Compact Top Header */}
         <header className="flex items-center justify-between gap-3 pb-4 mb-5 border-b border-white/[0.08]">
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5 shrink-0">
             <div className="w-8 h-8 rounded-xl bg-[#e11d48]/15 border border-[#e11d48]/40 flex items-center justify-center shrink-0">
               <Clapperboard className="w-4 h-4 text-[#e11d48]" />
             </div>
-            <h1 className="text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0">
+            <h1 className="text-lg font-bold tracking-tight text-white whitespace-nowrap">
               CineMinde
             </h1>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="text-xs text-zinc-400 font-mono-num whitespace-nowrap">
-              {watchedMovies.length} sedda · {watchlist.length} sparade
-            </span>
-
-            {currentUser && (
-              <button
-                type="button"
-                onClick={() => setActiveTab("profile")}
-                title={`Inloggad och synkad som ${currentUser.email || currentUser.displayName} (Klicka för smakprofil & konto)`}
-                className="min-h-[30px] px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-[11px] font-medium text-emerald-300 flex items-center gap-1.5 cursor-pointer hover:bg-emerald-500/25 transition-colors"
-              >
-                <UserCheck className="w-3.5 h-3.5 shrink-0" />
-                <span className="max-w-[100px] truncate">
-                  {currentUser.displayName || currentUser.email?.split("@")[0] || "Synkad"}
-                </span>
-              </button>
-            )}
-          </div>
+          {currentUser && (
+            <button
+              type="button"
+              onClick={() => setActiveTab("profile")}
+              title={`Inloggad och synkad som ${currentUser.email || currentUser.displayName} (Klicka för smakprofil & konto)`}
+              className="min-h-[30px] px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-[11px] font-medium text-emerald-300 flex items-center gap-1.5 cursor-pointer hover:bg-emerald-500/25 transition-colors shrink-0 max-w-[180px]"
+            >
+              <UserCheck className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">
+                {currentUser.displayName || currentUser.email?.split("@")[0] || "Synkad"}
+              </span>
+            </button>
+          )}
         </header>
 
         {/* Feedback Toast Banner */}
