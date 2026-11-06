@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -542,6 +543,10 @@ async function enrichSingleMovieWithTmdb(
       tmdbGenres,
       seasonCount,
     };
+    if (tmdbEnrichCache.size > 500) {
+      const oldestKey = tmdbEnrichCache.keys().next().value;
+      if (oldestKey) tmdbEnrichCache.delete(oldestKey);
+    }
     tmdbEnrichCache.set(cacheKey, result);
     return result;
   } catch {
@@ -552,6 +557,11 @@ async function enrichSingleMovieWithTmdb(
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
+
+  // Lightweight health check endpoint for keep-alive cron jobs / Render monitors
+  app.get(["/health", "/api/health"], (_req, res) => {
+    res.status(200).send("OK");
+  });
 
   app.use(express.json({ limit: "2mb" }));
 
@@ -1312,14 +1322,19 @@ Svara ENDAST med ett JSON-objekt på formatet: {"summary": "Din personliga samma
     }
   });
 
-  if (process.env.NODE_ENV !== "production") {
+  const distPath = path.join(__dirname, "dist");
+  const isProduction =
+    process.env.NODE_ENV === "production" ||
+    process.env.RENDER === "true" ||
+    fs.existsSync(path.join(distPath, "index.html"));
+
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, "dist");
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
