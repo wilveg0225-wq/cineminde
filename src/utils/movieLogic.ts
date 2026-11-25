@@ -925,6 +925,7 @@ export interface TmdbDiscoverFilters {
   originalLanguages: string[];
   companyIds: number[];
   keywordGroups: number[][];
+  strictKeywords?: boolean;
   withoutKeywordIds: number[];
   fallbackGenreIds: number[];
   withoutGenreIds: number[];
@@ -1155,6 +1156,26 @@ export function extractTmdbDiscoverFilters(
     minVoteAverage = 7.0;
   }
 
+  const hasExplicitFamilyOrKids = allSelected.some((c) =>
+    [
+      "Familj",
+      "Familjefilm",
+      "Barnfilm",
+      "Familjeäventyr",
+      "Familjekomedi",
+      "Sagovärld",
+      "Julfilm",
+      "Disney",
+      "Pixar",
+    ].includes(c)
+  );
+  if (!hasExplicitFamilyOrKids) {
+    // Exclude TMDB TV "Kids" genre (10762) by default so adult genres like Superhjältar don't return kids cartoons (Teen Titans Go!, Henry Danger, etc.)
+    addWithoutGenres(10762);
+  }
+
+  let strictKeywords = false;
+
   // Superheroes (9715 = superhero, 2095 = anti hero, 33637 = super power, 155030 = superhero team)
   if (
     allSelected.some((c) =>
@@ -1169,6 +1190,7 @@ export function extractTmdbDiscoverFilters(
       ].includes(c)
     )
   ) {
+    strictKeywords = true;
     addKeywords(9715);
     if (allSelected.includes("Antihjältar") || allSelected.includes("Mörka hjältar")) {
       addKeywords(2095);
@@ -1177,6 +1199,29 @@ export function extractTmdbDiscoverFilters(
     } else if (allSelected.includes("Hjälteteam")) {
       addKeywords(155030, 265979); // superhero team, superhero teamup
     }
+  }
+
+  if (
+    allSelected.some((c) =>
+      [
+        "Zombies",
+        "Vampyrer",
+        "Spöken",
+        "Rymden",
+        "Tidsresor",
+        "AI & Robotar",
+        "Dystopi",
+        "Seriemördare",
+        "Maffia",
+        "Spionage",
+        "Heist / Kupp",
+        "Biljakter",
+        "Sport",
+        "Kampsport",
+      ].includes(c)
+    )
+  ) {
+    strictKeywords = true;
   }
 
   // Narrow genre & content keywords (ALL live-verified via TMDB /3/keyword/{id})
@@ -1793,6 +1838,7 @@ export function extractTmdbDiscoverFilters(
     originalLanguages,
     companyIds,
     keywordGroups,
+    strictKeywords: strictKeywords || undefined,
     withoutKeywordIds: Array.from(withoutKeywordSet),
     fallbackGenreIds: Array.from(fallbackGenreSet),
     withoutGenreIds: Array.from(withoutGenreSet),
@@ -4217,6 +4263,66 @@ export const CURATED_TMDB_MOVIES: TmdbMovieEnrichment[] = [
     },
   },
   {
+    tmdbId: 61889,
+    title: "Daredevil",
+    originalTitle: "Marvel's Daredevil",
+    year: "2015",
+    mediaType: "tv",
+    voteAverage: 8.2,
+    tmdbGenreIds: [10759, 80, 18],
+    tmdbGenres: ["Action & Äventyr", "Krim", "Drama"],
+    ageRating: "15+",
+    swedishProviders: {
+      type: "flatrate",
+      providers: [PROVIDERS.DISNEY],
+    },
+  },
+  {
+    tmdbId: 95557,
+    title: "Invincible",
+    originalTitle: "Invincible",
+    year: "2021",
+    mediaType: "tv",
+    voteAverage: 8.6,
+    tmdbGenreIds: [16, 10765, 10759, 18],
+    tmdbGenres: ["Animerat", "Sci-Fi & Fantasy", "Action & Äventyr", "Drama"],
+    ageRating: "15+",
+    swedishProviders: {
+      type: "flatrate",
+      providers: [PROVIDERS.PRIME],
+    },
+  },
+  {
+    tmdbId: 79788,
+    title: "Watchmen",
+    originalTitle: "Watchmen",
+    year: "2019",
+    mediaType: "tv",
+    voteAverage: 7.9,
+    tmdbGenreIds: [10765, 18, 9648, 10759],
+    tmdbGenres: ["Sci-Fi & Fantasy", "Drama", "Mysterium", "Action & Äventyr"],
+    ageRating: "15+",
+    swedishProviders: {
+      type: "flatrate",
+      providers: [PROVIDERS.MAX],
+    },
+  },
+  {
+    tmdbId: 110492,
+    title: "Peacemaker",
+    originalTitle: "Peacemaker",
+    year: "2022",
+    mediaType: "tv",
+    voteAverage: 8.3,
+    tmdbGenreIds: [10759, 35, 10765],
+    tmdbGenres: ["Action & Äventyr", "Komedi", "Sci-Fi & Fantasy"],
+    ageRating: "15+",
+    swedishProviders: {
+      type: "flatrate",
+      providers: [PROVIDERS.MAX],
+    },
+  },
+  {
     tmdbId: 124364,
     title: "FROM",
     originalTitle: "FROM",
@@ -4799,7 +4905,8 @@ export function buildRecommendationSystemPrompt(
   tasteProfileSummary: string,
   preferences: EveningPreferences,
   previousTitles: string[] = [],
-  dislikedCategories: string[] = []
+  dislikedCategories: string[] = [],
+  targetCount = 5
 ): string {
   const excludedTitles = [
     ...watchedMovies.map((m) =>
@@ -4999,7 +5106,7 @@ ${
 `
       : "";
 
-  return `Du är CineMinde – en elitskribent och expert på både film och TV-serier på svenska. Din uppgift är att rekommendera exakt 5 skräddarsydda titlar för ikväll som en JSON-array.
+  return `Du är CineMinde – en elitskribent och expert på både film och TV-serier på svenska. Din uppgift är att rekommendera exakt ${targetCount} skräddarsydda titlar för ikväll som en JSON-array.
 
 ${mediaInstruction}
 ${steeringInstruction}
@@ -5073,7 +5180,7 @@ Användaren har i sin smakprofil uttryckligen angett att hen ogillar och INTE vi
     : ""
 }
 
-SVARSFORMAT (MÅSTE VARA EN GILTIG JSON-ARRAY MED EXAKT 5 OBJEKT – INGA TRAILING COMMAS):
+SVARSFORMAT (MÅSTE VARA EN GILTIG JSON-ARRAY MED EXAKT ${targetCount} OBJEKT – INGA TRAILING COMMAS):
 Exempel på exakt fältstruktur för varje objekt i JSON-arrayen:
 [
   {
@@ -5587,10 +5694,70 @@ const FALLBACK_CATALOG: CatalogEntry[] = [
     mediaType: "tv",
     vibeTags: ["TV-serie", "Becksvart action-satir", "Korrupta superhjältar", "Högoktanigt"],
     matchingMoods: ["Adrenalin & Puls", "Becksvart & Kompromisslös", "Högt tempo direkt (ingen seg start)", "Mellanlång serie (3–5 säsonger)"],
-    matchingContents: ["Hämndberättelse", "Välkoreograferad action", "Konspiration & Hemligheter", "Action"],
+    matchingContents: ["Superhjältar", "Antihjältar", "Mörka hjältar", "Superkrafter", "Hämndberättelse", "Välkoreograferad action", "Konspiration & Hemligheter", "Action"],
     matchingQualityTags: ["Spänningen & Tempot", "Action- & Stridsscenerna", "Karaktärerna & Skådespeleriet"],
     hookSwedish: "En grupp hänsynslösa vigilantes tar upp kampen mot korrupta superhjältar som missbrukar sin makt bakom en polerad fasad.",
     connectionReasonSwedish: "det kompromisslösa tempot, den svarta humorn och den intensiva spänningen",
+  },
+  {
+    title: "Daredevil",
+    originalTitle: "Marvel's Daredevil",
+    year: "2015",
+    runtime: "3 säsonger · ~55 min/avsnitt",
+    runtimeMinutes: 55,
+    yearNum: 2015,
+    mediaType: "tv",
+    vibeTags: ["TV-serie", "Mörk superhjälte", "Rå närkamp", "Hell's Kitchen"],
+    matchingMoods: ["Mörk & rå", "Spännande på helspänn", "Mellanlång serie (3–5 säsonger)"],
+    matchingContents: ["Superhjältar", "Marvel", "Mörka hjältar", "Kampsport", "Närkamp", "Action", "Krim"],
+    matchingQualityTags: ["Action- & Stridsscenerna", "Karaktärerna & Skådespeleriet", "Stämningen / Atmosfären"],
+    hookSwedish: "Den blinde advokaten Matt Murdock bekämpar brottslighet i rättssalen på dagen och som maskerad vigilante på gatorna i Hell's Kitchen om natten.",
+    connectionReasonSwedish: "den jordnära realismen, de råa en-tagningsstriderna och de starka karaktärerna",
+  },
+  {
+    title: "Invincible",
+    originalTitle: "Invincible",
+    year: "2021",
+    runtime: "3 säsonger · ~45 min/avsnitt",
+    runtimeMinutes: 45,
+    yearNum: 2021,
+    mediaType: "tv",
+    vibeTags: ["TV-serie", "Vuxenanimation", "Brutal superhjälteserie", "Stark twist"],
+    matchingMoods: ["Adrenalin & Puls", "Mörk & rå", "Spännande på helspänn", "Mellanlång serie (3–5 säsonger)"],
+    matchingContents: ["Superhjältar", "Superkrafter", "Animerat", "Vuxenanimation", "Action", "Sci-Fi"],
+    matchingQualityTags: ["Spänningen & Tempot", "Action- & Stridsscenerna", "Manuset & Dialogen"],
+    hookSwedish: "Tonåringen Mark Grayson utvecklar superkrafter precis som sin pappa – jordens mäktigaste hjälte – men upptäcker snart en chockerande mörk sanning.",
+    connectionReasonSwedish: "det skarpa berättandet, de brutala vändningarna och det höga känslomässiga insatserna",
+  },
+  {
+    title: "Watchmen",
+    originalTitle: "Watchmen",
+    year: "2019",
+    runtime: "1 säsong · 9 avsnitt",
+    runtimeMinutes: 60,
+    yearNum: 2019,
+    mediaType: "tv",
+    vibeTags: ["Miniserie", "Mörk superhjälte", "Smart konspiration", "Hyllat mästerverk"],
+    matchingMoods: ["Mörk & rå", "Tankeväckande", "Miniserie", "Avslutad serie"],
+    matchingContents: ["Superhjältar", "DC", "Mörka hjältar", "Antihjältar", "Mysterium", "Konspiration & Hemligheter", "Action"],
+    matchingQualityTags: ["Manuset & Dialogen", "Världsbygget / Miljön", "Stämningen / Atmosfären"],
+    hookSwedish: "I en alternativ nutid där maskerade poliser och gamla superhjältar lever under ytan nystar detektiven Angela Abar upp en djupt gående konspiration.",
+    connectionReasonSwedish: "det briljanta världsbygget, det täta mysteriet och den vuxna, tankeväckande tonen",
+  },
+  {
+    title: "Peacemaker",
+    originalTitle: "Peacemaker",
+    year: "2022",
+    runtime: "2 säsonger · ~45 min/avsnitt",
+    runtimeMinutes: 45,
+    yearNum: 2022,
+    mediaType: "tv",
+    vibeTags: ["TV-serie", "Antihjälte", "Actionkomedi", "Skruvad humor"],
+    matchingMoods: ["Rolig & rapp", "Adrenalin & Puls", "1–2 säsonger"],
+    matchingContents: ["Superhjältar", "DC", "Antihjältar", "Hjälteteam", "Action", "Komedi", "Actionkomedi"],
+    matchingQualityTags: ["Manuset & Dialogen", "Action- & Stridsscenerna", "Karaktärerna & Skådespeleriet"],
+    hookSwedish: "Den skruvade antihjälten Peacemaker rekryteras till ett hemligt uppdrag fyllt av konspirationer, stenhård action och oväntat mycket hjärta.",
+    connectionReasonSwedish: "den rappa humorn, den energiska actionkoreografin och den oväntade karaktärsutvecklingen",
   },
   {
     title: "The Sopranos",
@@ -5820,7 +5987,12 @@ export function generateSmartFallbackRecommendations(
       } else if (matchedGenreCount > 0 && matchedGenreCount < totalChosenGenres) {
         // Penalize partial match that ignores one of the user's primary genres
         score -= 20;
+      } else {
+        score -= 25;
       }
+    } else if (totalChosenGenres === 1 && matchedGenreCount === 0) {
+      // Penalize entries that don't match the user's chosen genre
+      score -= 18;
     }
 
     const totalChosenCategories =

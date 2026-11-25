@@ -107,56 +107,66 @@ async function callGeminiWithFallback(
     name: string;
     timeoutMs: number;
   }> = [
-    { name: "gemini-3.5-flash-lite", timeoutMs: 18000 },
-    { name: "gemini-3.1-flash-lite-preview", timeoutMs: 18000 },
-    { name: "gemini-flash-lite-latest", timeoutMs: 18000 },
-    { name: "gemini-3.8-flash", timeoutMs: 22000 },
-    { name: "gemini-3.1-flash-lite", timeoutMs: 18000 },
-    { name: "gemini-flash-latest", timeoutMs: 22000 },
+    { name: "gemini-flash-lite-latest", timeoutMs: 12000 },
+    { name: "gemini-3.1-flash-lite", timeoutMs: 12000 },
+    { name: "gemini-flash-latest", timeoutMs: 14000 },
+    { name: "gemini-3.5-flash-lite", timeoutMs: 10000 },
+    { name: "gemini-3.8-flash", timeoutMs: 12000 },
+    { name: "gemini-3.1-flash-lite-preview", timeoutMs: 10000 },
   ];
 
   const tag = params.label || "generateContent";
 
-  for (const modelSpec of modelsToTry) {
-    const maxAttempts = 2;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const response = await ai.models.generateContent({
-          model: modelSpec.name,
-          contents: params.contents,
-          config: {
-            ...(params.systemInstruction
-              ? { systemInstruction: params.systemInstruction }
-              : {}),
-            responseMimeType: params.responseMimeType || "application/json",
-            temperature: params.temperature,
-            abortSignal: AbortSignal.timeout(modelSpec.timeoutMs),
-          },
-        });
-        const text = response?.text?.trim();
-        if (text) {
-          return text;
-        }
-        console.warn(
-          `[Gemini:${tag}] Empty response from ${modelSpec.name} (attempt ${attempt})`
-        );
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        const transient = isTransientGeminiError(err);
-        console.warn(
-          `[Gemini:${tag}] ${modelSpec.name} failed (attempt ${attempt}/${maxAttempts}, transient=${transient}): ${errMsg.slice(
-            0,
-            200
-          )}`
-        );
-        if (!transient) {
-          break; // Immediately move to next model on 400/404/invalid config
-        }
-        if (attempt < maxAttempts) {
-          const backoffMs = 800 * attempt + Math.floor(Math.random() * 500);
-          await new Promise((resolve) => setTimeout(resolve, backoffMs));
-        }
+  const tryModelOnce = async (modelSpec: {
+    name: string;
+    timeoutMs: number;
+  }): Promise<{ text: string | null; transient: boolean }> => {
+    try {
+      const response = await ai.models.generateContent({
+        model: modelSpec.name,
+        contents: params.contents,
+        config: {
+          ...(params.systemInstruction
+            ? { systemInstruction: params.systemInstruction }
+            : {}),
+          responseMimeType: params.responseMimeType || "application/json",
+          temperature: params.temperature,
+          abortSignal: AbortSignal.timeout(modelSpec.timeoutMs),
+        },
+      });
+      const text = response?.text?.trim();
+      if (text) {
+        return { text, transient: false };
       }
+      console.warn(`[Gemini:${tag}] Empty response from ${modelSpec.name}`);
+      return { text: null, transient: true };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const transient = isTransientGeminiError(err);
+      console.warn(
+        `[Gemini:${tag}] ${modelSpec.name} failed (transient=${transient}): ${errMsg.slice(
+          0,
+          200
+        )}`
+      );
+      return { text: null, transient };
+    }
+  };
+
+  // Pass 1: Fail over quickly across models (1 attempt each so a 503/slow model never stalls the request)
+  const transientCandidates: Array<{ name: string; timeoutMs: number }> = [];
+  for (const modelSpec of modelsToTry) {
+    const res = await tryModelOnce(modelSpec);
+    if (res.text) return res.text;
+    if (res.transient) transientCandidates.push(modelSpec);
+  }
+
+  // Pass 2: Quick single retry on top 2 transient candidates if all models had a brief spike
+  if (transientCandidates.length > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    for (const modelSpec of transientCandidates.slice(0, 2)) {
+      const res = await tryModelOnce(modelSpec);
+      if (res.text) return res.text;
     }
   }
   console.warn(`[Gemini:${tag}] All models failed; falling back to TMDB/local curator.`);
@@ -578,7 +588,7 @@ async function discoverTmdbCandidates(
         : "";
       const minVoteAvg =
         discoverFilters.minVoteAverage ??
-        (usedFallbackGenres ? 6.8 : undefined);
+        (usedFallbackGenres ? 6.8 : 6.6);
       const voteAvgParam = minVoteAvg ? `&vote_average.gte=${minVoteAvg}` : "";
 
       // Query across multiple pages if needed so we never run out of fresh titles
@@ -614,6 +624,11 @@ async function discoverTmdbCandidates(
           continue;
         }
 
+        // On subsequent pages (p > initialPage), never relax/drop strict filters; stop paging instead
+        if (p > initialPage && (!data?.results || data.results.length === 0)) {
+          break;
+        }
+
         // Fallback 0: if multiple AND-joined keywords yielded < 5 hits, step down softly to OR-joined keywords BEFORE dropping keywords!
         if (
           (!data?.results || data.results.length < 5) &&
@@ -639,10 +654,12 @@ async function discoverTmdbCandidates(
           }
         }
 
-        // Fallback 1: if keyword filter still yielded 0 hits, relax keyword filter while keeping genres
+        // Fallback 1: if keyword filter still yielded 0 hits, relax keyword filter ONLY when keywords are NOT strict thematic identifiers (e.g. never drop Superhero/Zombie/Space keywords into generic Sci-Fi/Fantasy!)
         if (
+          p === initialPage &&
           (!data?.results || data.results.length === 0) &&
-          keywordParam
+          keywordParam &&
+          !discoverFilters.strictKeywords
         ) {
           const relaxedUrl = `${baseUrl}${genreParam}`;
           try {
@@ -1478,7 +1495,8 @@ async function startServer() {
           tasteProfileSummary,
           effectivePreferences,
           effectivePreviousTitles,
-          dislikedCategories
+          dislikedCategories,
+          candidateTargetCount
         );
 
         const sampleTitles =

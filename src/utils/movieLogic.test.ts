@@ -1588,3 +1588,36 @@ test("Franchise deduplication (max 1 per series) and London location keyword wit
     true
   );
 });
+
+test("Superhjältar + Serie enforces strict keywords, excludes Kids (10762), and fallback returns superhero series", () => {
+  const filters = extractTmdbDiscoverFilters({
+    moods: [],
+    genres: ["Superhjältar"],
+    contents: [],
+    frameworks: [],
+    customText: "",
+    mediaType: "tv",
+  });
+  assert.equal(filters.strictKeywords, true);
+  assert.ok(filters.keywordGroups.some((g) => g.includes(9715)));
+  assert.ok(filters.withoutGenreIds.includes(10762));
+
+  const fallbacks = generateSmartFallbackRecommendations(
+    [],
+    [],
+    {
+      moods: [],
+      genres: ["Superhjältar"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "tv",
+    }
+  );
+  assert.equal(fallbacks.length, 5);
+  const titles = fallbacks.map((r) => r.title);
+  assert.ok(titles.includes("The Boys"));
+  assert.ok(titles.includes("Daredevil"));
+  assert.ok(titles.includes("Invincible"));
+  assert.ok(!titles.some((t) => t.toLowerCase().includes("witcher")));
+});
