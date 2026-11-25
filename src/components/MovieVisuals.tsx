@@ -5,6 +5,7 @@ import {
   StreamingProvider,
   getTmdbPosterUrl,
   getTmdbLogoUrl,
+  normalizeSwedishAgeRating,
 } from "../utils/movieLogic";
 
 interface MoviePosterProps {
@@ -228,5 +229,83 @@ export const SwedishStreamingSection: React.FC<
         ))}
       </div>
     </div>
+  );
+};
+
+interface AgeRatingBadgeProps {
+  ageRating?: string;
+  variant?: "subtle" | "overlay";
+}
+
+function getAgeRatingMeta(normalized: string): {
+  label: string;
+  title: string;
+  subtleClass: string;
+  overlayClass: string;
+} {
+  switch (normalized) {
+    case "Btl":
+      return {
+        label: "Btl",
+        title: "Barntillåten (alla åldrar)",
+        subtleClass:
+          "bg-emerald-500/10 text-emerald-300/90 border-emerald-500/30",
+        overlayClass:
+          "bg-black/60 text-emerald-300 border-emerald-500/35 backdrop-blur-md",
+      };
+    case "7+":
+      return {
+        label: "7+",
+        title: "Åldersgräns: 7 år",
+        subtleClass: "bg-sky-500/10 text-sky-300/90 border-sky-500/30",
+        overlayClass:
+          "bg-black/60 text-sky-300 border-sky-500/35 backdrop-blur-md",
+      };
+    case "11+":
+      return {
+        label: "11+",
+        title: "Åldersgräns: 11 år",
+        subtleClass: "bg-amber-500/10 text-amber-300/90 border-amber-500/30",
+        overlayClass:
+          "bg-black/60 text-amber-300 border-amber-500/35 backdrop-blur-md",
+      };
+    case "18+":
+      return {
+        label: "18+",
+        title: "Åldersgräns: 18 år",
+        subtleClass: "bg-rose-500/15 text-rose-300 border-rose-500/35",
+        overlayClass:
+          "bg-black/60 text-rose-300 border-rose-500/40 backdrop-blur-md",
+      };
+    default:
+      return {
+        label: normalized,
+        title: `Åldersgräns: ${normalized.replace("+", "")} år`,
+        subtleClass: "bg-rose-500/10 text-rose-300/90 border-rose-500/30",
+        overlayClass:
+          "bg-black/60 text-rose-300 border-rose-500/35 backdrop-blur-md",
+      };
+  }
+}
+
+export const AgeRatingBadge: React.FC<AgeRatingBadgeProps> = ({
+  ageRating,
+  variant = "subtle",
+}) => {
+  const normalized = normalizeSwedishAgeRating(ageRating);
+  if (!normalized) return null;
+
+  const meta = getAgeRatingMeta(normalized);
+
+  return (
+    <span
+      title={meta.title}
+      aria-label={meta.title}
+      className={`inline-flex items-center justify-center px-1.5 py-[2px] rounded-[5px] border text-[10px] font-mono-num font-bold leading-none tracking-tight shrink-0 select-none ${
+        variant === "overlay" ? meta.overlayClass : meta.subtleClass
+      }`}
+    >
+      {meta.label}
+    </span>
   );
 };

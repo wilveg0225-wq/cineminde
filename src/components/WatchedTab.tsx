@@ -17,7 +17,7 @@ import {
   lookupCuratedTmdbMovie,
 } from "../utils/movieLogic";
 import { RateMovieDraft } from "./RateMovieModal";
-import { MoviePoster } from "./MovieVisuals";
+import { MoviePoster, AgeRatingBadge } from "./MovieVisuals";
 
 interface WatchedTabProps {
   watchedMovies: WatchedMovie[];
@@ -116,6 +116,7 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
       tmdbRating: hit.voteAverage,
       swedishProviders: hit.swedishProviders,
       seasonCount: hit.seasonCount,
+      ageRating: hit.ageRating,
     });
   };
 
@@ -149,6 +150,7 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
       tmdbRating: meta.voteAverage,
       swedishProviders: meta.swedishProviders,
       seasonCount: meta.seasonCount,
+      ageRating: meta.ageRating,
     });
   };
 
@@ -259,6 +261,7 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.06] text-zinc-300 font-sans">
                           {hit.mediaType === "tv" ? "TV-serie" : "Film"}
                         </span>
+                        <AgeRatingBadge ageRating={hit.ageRating} />
                         <span>{hit.year}</span>
                         {typeof hit.voteAverage === "number" &&
                           hit.voteAverage > 0 && (
@@ -366,8 +369,17 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
                         <h3 className="text-base font-bold text-white leading-snug truncate">
                           {movie.title}
                         </h3>
-                        <div className="flex items-center gap-2 text-xs text-zinc-400 font-mono-num mt-0.5">
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400 font-mono-num mt-0.5">
                           {movie.year && <span>{movie.year}</span>}
+                          <AgeRatingBadge
+                            ageRating={
+                              movie.ageRating ||
+                              lookupCuratedTmdbMovie(
+                                movie.originalTitle || movie.title,
+                                movie.year
+                              ).ageRating
+                            }
+                          />
                           {typeof movie.tmdbRating === "number" &&
                             movie.tmdbRating > 0 && (
                               <>
@@ -401,6 +413,7 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
                               tmdbRating: movie.tmdbRating,
                               swedishProviders: movie.swedishProviders,
                               seasonCount: movie.seasonCount,
+                              ageRating: movie.ageRating,
                             })
                           }
                           aria-label={`Redigera ${movie.title}`}

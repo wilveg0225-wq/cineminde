@@ -11,6 +11,10 @@ import {
   X,
   Film,
   Tv,
+  SlidersHorizontal,
+  ChevronDown,
+  ChevronUp,
+  Compass,
 } from "lucide-react";
 import {
   GENRE_GROUPS,
@@ -25,11 +29,21 @@ import {
   EveningPreferences,
   MovieRecommendation,
   WatchedMovie,
+  MovieSteeringContext,
+  MovieSteeringSliders,
+  DEFAULT_STEERING_SLIDERS,
+  STEERING_QUICK_TWEAKS,
+  describeSteeringAdjustments,
   normalizeMovieTitle,
   movieMatchesStreamingProviders,
   filterMoviesByStreamingServices,
+  inferAgeRatingFromGenres,
 } from "../utils/movieLogic";
-import { MoviePoster, SwedishStreamingSection } from "./MovieVisuals";
+import {
+  MoviePoster,
+  SwedishStreamingSection,
+  AgeRatingBadge,
+} from "./MovieVisuals";
 
 type FilterCategoryKey = "genres" | "contents" | "frameworks" | "moods";
 
@@ -43,30 +57,93 @@ const FILTER_CATEGORIES: {
   {
     key: "genres",
     label: "Genrer",
-    subtitle: "Klicka på en genre eller tryck [+] för underkategorier (t.ex. Action-romans)",
+    subtitle: "Välj genre eller tryck [+] för underkategorier",
     groups: GENRE_GROUPS,
     accent: "rose",
   },
   {
     key: "contents",
     label: "Handling",
-    subtitle: "Välj handlingstema eller tryck [+] för specifika troper & vändningar",
+    subtitle: "Välj handling eller tryck [+] för underkategorier",
     groups: CONTENT_GROUPS,
     accent: "rose",
   },
   {
     key: "frameworks",
     label: "Miljö/Era",
-    subtitle: "Välj plats, historisk epok eller utgivningsår med [+]",
+    subtitle: "Välj miljö eller era, tryck [+] för underkategorier",
     groups: SETTING_GROUPS,
     accent: "amber",
   },
   {
     key: "moods",
     label: "Stämning",
-    subtitle: "Välj känsla, tempo och speltid med [+]",
+    subtitle: "Välj stämning eller tryck [+] för underkategorier",
     groups: MOOD_GROUPS,
     accent: "rose",
+  },
+];
+
+interface SteeringSliderConfig {
+  key: keyof MovieSteeringSliders;
+  title: string;
+  leftLabel: string;
+  rightLabel: string;
+  valueLabels: Record<number, string>;
+}
+
+const STEERING_SLIDER_CONFIGS: readonly SteeringSliderConfig[] = [
+  {
+    key: "mood",
+    title: "Känsla",
+    leftLabel: "Varmare & lättare",
+    rightLabel: "Mörkare & tyngre",
+    valueLabels: {
+      [-2]: "Mycket lättare",
+      [-1]: "Lite lättare",
+      0: "Samma",
+      1: "Lite mörkare",
+      2: "Mycket mörkare",
+    },
+  },
+  {
+    key: "pace",
+    title: "Tempo",
+    leftLabel: "Lugnare & atmosfär",
+    rightLabel: "Snabbare & mer fart",
+    valueLabels: {
+      [-2]: "Mycket lugnare",
+      [-1]: "Lite lugnare",
+      0: "Samma",
+      1: "Lite snabbare",
+      2: "Mycket snabbare",
+    },
+  },
+  {
+    key: "depth",
+    title: "Hjärnkapacitet",
+    leftLabel: "Enklare / koppla av",
+    rightLabel: "Djupare / tankeväckande",
+    valueLabels: {
+      [-2]: "Mycket enklare",
+      [-1]: "Lite enklare",
+      0: "Samma",
+      1: "Lite djupare",
+      2: "Mycket djupare",
+    },
+  },
+  {
+    key: "tone",
+    title: "Ton",
+    leftLabel: "Mer humor & lekfullt",
+    rightLabel: "Mer allvar & spänning",
+    valueLabels: {
+      [-2]: "Mycket mer humor",
+      [-1]: "Lite mer humor",
+      0: "Samma",
+      1: "Lite mer spänning",
+      2: "Mycket mer spänning",
+    },
   },
 ];
 
@@ -77,6 +154,9 @@ interface TonightTabProps {
   isLoading: boolean;
   error: string | null;
   onFindMovies: () => Promise<void> | void;
+  onSteerFromMovie?: (steering: MovieSteeringContext) => Promise<void> | void;
+  activeSteering?: MovieSteeringContext | null;
+  onClearSteering?: () => void;
   onAddToWatchlist: (movie: MovieRecommendation) => void;
   onMarkAsWatched: (movie: MovieRecommendation) => void;
   watchlist: MovieRecommendation[];
@@ -91,6 +171,9 @@ export const TonightTab: React.FC<TonightTabProps> = ({
   isLoading,
   error,
   onFindMovies,
+  onSteerFromMovie,
+  activeSteering = null,
+  onClearSteering,
   onAddToWatchlist,
   onMarkAsWatched,
   watchlist,
@@ -101,6 +184,63 @@ export const TonightTab: React.FC<TonightTabProps> = ({
   const [activeCategory, setActiveCategory] =
     useState<FilterCategoryKey>("genres");
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
+  const [steeringCardKey, setSteeringCardKey] = useState<string | null>(null);
+  const [steeringSliders, setSteeringSliders] = useState<MovieSteeringSliders>({
+    ...DEFAULT_STEERING_SLIDERS,
+  });
+  const [steeringTweaks, setSteeringTweaks] = useState<string[]>([]);
+  const [steeringNote, setSteeringNote] = useState<string>("");
+
+  const openSteeringForCard = (cardKey: string) => {
+    if (steeringCardKey === cardKey) {
+      setSteeringCardKey(null);
+      return;
+    }
+    setSteeringCardKey(cardKey);
+    setSteeringSliders({ ...DEFAULT_STEERING_SLIDERS });
+    setSteeringTweaks([]);
+    setSteeringNote("");
+  };
+
+  const resetSteeringControls = () => {
+    setSteeringSliders({ ...DEFAULT_STEERING_SLIDERS });
+    setSteeringTweaks([]);
+    setSteeringNote("");
+  };
+
+  const toggleSteeringTweak = (tweak: string) => {
+    setSteeringTweaks((prev) =>
+      prev.includes(tweak) ? prev.filter((t) => t !== tweak) : [...prev, tweak]
+    );
+  };
+
+  const hasCustomSteeringInput =
+    Object.values(steeringSliders).some((v) => v !== 0) ||
+    steeringTweaks.length > 0 ||
+    steeringNote.trim().length > 0;
+
+  const handleSubmitSteering = async (rec: MovieRecommendation) => {
+    if (!onSteerFromMovie) return;
+    const context: MovieSteeringContext = {
+      anchorMovie: {
+        title: rec.title,
+        originalTitle: rec.originalTitle,
+        year: rec.year,
+        runtime: rec.runtime,
+        mediaType: rec.mediaType,
+        vibeTags: rec.vibeTags,
+        tmdbGenres: rec.tmdbGenres,
+      },
+      sliders: { ...steeringSliders },
+      quickTweaks: [...steeringTweaks],
+      note: steeringNote.trim() || undefined,
+    };
+    setSteeringCardKey(null);
+    await onSteerFromMovie(context);
+    setTimeout(() => {
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
+  };
 
   const selectedProviders = preferences.streamingProviders || [];
 
@@ -213,10 +353,10 @@ export const TonightTab: React.FC<TonightTabProps> = ({
           ...baseCatConfig,
           subtitle:
             mediaType === "tv"
-              ? "Välj känsla, tempo och serielängd (miniserie, antal säsonger) med [+]"
+              ? "Välj stämning, tempo eller serielängd med [+]"
               : mediaType === "movie"
-              ? "Välj känsla, tempo och speltid med [+]"
-              : "Välj känsla, tempo och längd (film eller serie) med [+]",
+              ? "Välj stämning, tempo eller speltid med [+]"
+              : "Välj stämning, tempo eller längd med [+]",
           groups: getMoodGroupsForMediaType(mediaType),
         }
       : baseCatConfig;
@@ -529,7 +669,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                       {expandedGroup.label}
                     </h3>
                     <p className="text-xs text-zinc-400 mt-0.5">
-                      Klicka i en eller flera specifika inriktningar
+                      Välj en eller flera underkategorier
                     </p>
                   </div>
                   <button
@@ -569,9 +709,9 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                   </button>
                 </div>
 
-                {/* Subcategory Grid (2 columns, fixed dimensions, zero jump) */}
+                {/* Subcategory Grid (2 columns, matching main category clarity) */}
                 <div className="overflow-y-auto pr-0.5 flex-1">
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-1.5">
                     {expandedGroup.subchips.map((subchip) => {
                       const subActive = getCategoryValues(
                         currentCatConfig.key
@@ -585,7 +725,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                             toggleChip(currentCatConfig.key, subchip)
                           }
                           aria-pressed={subActive}
-                          className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-medium flex items-center justify-center text-center leading-tight transition-colors cursor-pointer ${
+                          className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-medium flex items-center justify-between gap-1.5 text-left transition-colors cursor-pointer ${
                             subActive
                               ? isAmber
                                 ? "bg-[#f59e0b] text-[#0a0a0c] border border-[#f59e0b] shadow-sm"
@@ -593,7 +733,10 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                               : "bg-[#0a0a0c] text-zinc-200 border border-white/[0.09] hover:border-white/[0.22]"
                           }`}
                         >
-                          <span>{subchip}</span>
+                          <span className="truncate">{subchip}</span>
+                          {subActive && (
+                            <Check className="w-3.5 h-3.5 shrink-0" />
+                          )}
                         </button>
                       );
                     })}
@@ -775,12 +918,20 @@ export const TonightTab: React.FC<TonightTabProps> = ({
         </button>
 
         {error && (
-          <p
+          <div
             role="alert"
-            className="text-xs text-rose-400 text-center pt-1"
+            className="mt-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2 text-xs text-amber-200"
           >
-            {error}
-          </p>
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={onFindMovies}
+              disabled={isLoading}
+              className="shrink-0 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 font-semibold transition-colors cursor-pointer disabled:opacity-50"
+            >
+              Försök igen
+            </button>
+          </div>
         )}
       </section>
 
@@ -797,37 +948,75 @@ export const TonightTab: React.FC<TonightTabProps> = ({
             aria-label="Kvällens rekommendationer"
             className="space-y-4 scroll-mt-4"
           >
-            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-              <div>
-                <h2 className="text-base font-bold text-white">
-                  {displayedRecs.length} skräddarsydda val för dig ikväll
-                </h2>
-                {selectedProviders.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-                    <p className="text-[11px] text-emerald-400">
-                      Visar endast titlar som finns på{" "}
-                      {selectedProviders
-                        .map((s) => (s.toLowerCase() === "max" ? "HBO Max" : s))
-                        .join(", ")}
+            <div className="space-y-2 px-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-base font-bold text-white">
+                    {displayedRecs.length} skräddarsydda val för dig ikväll
+                  </h2>
+                  {onSteerFromMovie && displayedRecs.length > 0 && (
+                    <p className="text-[11px] text-zinc-400 mt-0.5">
+                      Klicka på en film som känns åt rätt håll för att styra vidare med reglagen.
                     </p>
+                  )}
+                  {selectedProviders.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                      <p className="text-[11px] text-emerald-400">
+                        Visar endast titlar som finns på{" "}
+                        {selectedProviders
+                          .map((s) => (s.toLowerCase() === "max" ? "HBO Max" : s))
+                          .join(", ")}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onChangePreferences({
+                            ...preferences,
+                            streamingProviders: [],
+                          })
+                        }
+                        className="text-[10px] text-zinc-400 hover:text-white underline cursor-pointer"
+                      >
+                        (Visa alla tjänster)
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <span className="text-xs text-zinc-400 font-mono-num">
+                  TMDB & Streaming SE
+                </span>
+              </div>
+
+              {activeSteering && (
+                <div className="flex items-start justify-between gap-2.5 px-3.5 py-2.5 rounded-xl bg-[#e11d48]/10 border border-[#e11d48]/35 text-xs">
+                  <div className="flex items-start gap-2 min-w-0">
+                    <Compass className="w-4 h-4 text-[#e11d48] shrink-0 mt-0.5" />
+                    <div className="min-w-0">
+                      <p className="font-semibold text-white">
+                        Styrda vidare från{" "}
+                        <span className="text-[#f59e0b]">
+                          {activeSteering.anchorMovie.title}
+                        </span>
+                      </p>
+                      {describeSteeringAdjustments(activeSteering).length > 0 && (
+                        <p className="text-[11px] text-zinc-300 mt-0.5">
+                          {describeSteeringAdjustments(activeSteering).join(" · ")}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  {onClearSteering && (
                     <button
                       type="button"
-                      onClick={() =>
-                        onChangePreferences({
-                          ...preferences,
-                          streamingProviders: [],
-                        })
-                      }
-                      className="text-[10px] text-zinc-400 hover:text-white underline cursor-pointer"
+                      onClick={onClearSteering}
+                      aria-label="Rensa styrning"
+                      className="text-zinc-400 hover:text-white p-1 rounded-lg hover:bg-white/[0.06] transition-colors cursor-pointer shrink-0"
                     >
-                      (Visa alla tjänster)
+                      <X className="w-3.5 h-3.5" />
                     </button>
-                  </div>
-                )}
-              </div>
-              <span className="text-xs text-zinc-400 font-mono-num">
-                TMDB & Streaming SE
-              </span>
+                  )}
+                </div>
+              )}
             </div>
 
             {displayedRecs.length === 0 && selectedProviders.length > 0 ? (
@@ -875,6 +1064,8 @@ export const TonightTab: React.FC<TonightTabProps> = ({
             ) : (
               <div className="space-y-4">
                 {displayedRecs.map((rec, idx) => {
+                const cardKey = rec.id || `${rec.title}-${idx}`;
+                const isSteeringOpen = steeringCardKey === cardKey;
                 const saved = isInWatchlist(rec);
                 const showOriginal =
                   rec.originalTitle &&
@@ -887,15 +1078,24 @@ export const TonightTab: React.FC<TonightTabProps> = ({
 
                 return (
                   <article
-                    key={rec.id || `${rec.title}-${idx}`}
+                    key={cardKey}
                     className={`bg-[#16161a] border rounded-2xl p-5 space-y-4 transition-colors ${
-                      streamMatch.matchesFlatrate
+                      isSteeringOpen
+                        ? "border-[#e11d48]/70 shadow-lg shadow-[#e11d48]/10"
+                        : streamMatch.matchesFlatrate
                         ? "border-emerald-500/40"
                         : "border-white/[0.08]"
                     }`}
                   >
-                    {/* Top Header Row with w500 Poster + Title + Match % + TMDB Rating */}
-                    <div className="flex items-start gap-4">
+                    {/* Clickable top area to open steering sliders */}
+                    <div
+                      onClick={() => {
+                        if (onSteerFromMovie) openSteeringForCard(cardKey);
+                      }}
+                      className={`flex items-start gap-4 ${
+                        onSteerFromMovie ? "cursor-pointer group" : ""
+                      }`}
+                    >
                       <MoviePoster
                         title={rec.title}
                         year={rec.year}
@@ -961,6 +1161,12 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                         <span>
                           {rec.year} · {rec.runtime}
                         </span>
+                        <AgeRatingBadge
+                          ageRating={
+                            rec.ageRating ||
+                            inferAgeRatingFromGenres(rec.tmdbGenreIds)
+                          }
+                        />
                         {typeof rec.tmdbRating === "number" &&
                           rec.tmdbRating > 0 && (
                             <span className="inline-flex items-center gap-1 text-[#f59e0b] font-semibold">
@@ -1063,6 +1269,168 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                       <span>Redan sett</span>
                     </button>
                   </div>
+
+                  {/* Styr vidare från denna film */}
+                  {onSteerFromMovie && (
+                    <div className="pt-1">
+                      <button
+                        type="button"
+                        onClick={() => openSteeringForCard(cardKey)}
+                        aria-expanded={isSteeringOpen}
+                        className={`w-full min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 border transition-colors cursor-pointer ${
+                          isSteeringOpen
+                            ? "bg-[#e11d48]/15 text-white border-[#e11d48]/50"
+                            : "bg-white/[0.03] hover:bg-white/[0.07] text-zinc-200 border-white/[0.08]"
+                        }`}
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <SlidersHorizontal className="w-3.5 h-3.5 text-[#f59e0b]" />
+                          <span>
+                            {isSteeringOpen
+                              ? "Styr riktning från denna film"
+                              : "Åt rätt håll? Styr vidare från denna"}
+                          </span>
+                        </span>
+                        {isSteeringOpen ? (
+                          <ChevronUp className="w-4 h-4 text-zinc-400" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-zinc-400" />
+                        )}
+                      </button>
+
+                      {isSteeringOpen && (
+                        <div className="mt-3 rounded-xl bg-[#0e0e12] border border-white/[0.1] p-4 space-y-4">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <h4 className="text-xs font-bold text-white">
+                                Utgå från {rec.title}
+                              </h4>
+                              <p className="text-[11px] text-zinc-400 mt-0.5">
+                                Mitten = som denna film. Dra i det du vill justera:
+                              </p>
+                            </div>
+                            {hasCustomSteeringInput && (
+                              <button
+                                type="button"
+                                onClick={resetSteeringControls}
+                                className="text-[11px] text-zinc-400 hover:text-white inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] transition-colors cursor-pointer shrink-0"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                <span>Nollställ</span>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* 4 relative steering sliders */}
+                          <div className="space-y-3.5">
+                            {STEERING_SLIDER_CONFIGS.map((cfg) => {
+                              const val = steeringSliders[cfg.key];
+                              const activeText = cfg.valueLabels[val] || "Samma";
+                              return (
+                                <div key={cfg.key} className="space-y-1.5">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <label
+                                      htmlFor={`steer-${cardKey}-${cfg.key}`}
+                                      className="text-xs font-semibold text-zinc-200"
+                                    >
+                                      {cfg.title}
+                                    </label>
+                                    <span
+                                      className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${
+                                        val === 0
+                                          ? "bg-white/[0.05] text-zinc-400"
+                                          : "bg-[#e11d48]/20 text-rose-200 border border-[#e11d48]/40"
+                                      }`}
+                                    >
+                                      {activeText}
+                                    </span>
+                                  </div>
+                                  <input
+                                    id={`steer-${cardKey}-${cfg.key}`}
+                                    type="range"
+                                    min={-2}
+                                    max={2}
+                                    step={1}
+                                    value={val}
+                                    onChange={(e) =>
+                                      setSteeringSliders((prev) => ({
+                                        ...prev,
+                                        [cfg.key]: Number(e.target.value),
+                                      }))
+                                    }
+                                    className="w-full accent-[#e11d48] cursor-pointer h-1.5 bg-white/[0.12] rounded-lg"
+                                  />
+                                  <div className="flex items-center justify-between text-[10.5px] text-zinc-400">
+                                    <span>{cfg.leftLabel}</span>
+                                    <span>{cfg.rightLabel}</span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {/* Quick tweaks */}
+                          <div className="space-y-1.5 pt-1 border-t border-white/[0.06]">
+                            <span className="text-[11px] font-medium text-zinc-400 block">
+                              Snabbjusteringar (valfritt):
+                            </span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {STEERING_QUICK_TWEAKS.map((tweak) => {
+                                const active = steeringTweaks.includes(tweak);
+                                return (
+                                  <button
+                                    key={tweak}
+                                    type="button"
+                                    onClick={() => toggleSteeringTweak(tweak)}
+                                    aria-pressed={active}
+                                    className={`min-h-[30px] px-2.5 py-1 rounded-lg text-[11px] font-medium inline-flex items-center gap-1 transition-colors cursor-pointer ${
+                                      active
+                                        ? "bg-[#f59e0b] text-[#0a0a0c] font-semibold"
+                                        : "bg-[#16161a] text-zinc-300 border border-white/[0.1] hover:border-white/[0.25]"
+                                    }`}
+                                  >
+                                    {active && <Check className="w-3 h-3" />}
+                                    <span>{tweak}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          {/* Optional short note */}
+                          <input
+                            type="text"
+                            value={steeringNote}
+                            onChange={(e) => setSteeringNote(e.target.value)}
+                            placeholder="Valfritt: t.ex. mer 90-talskänsla eller utspelar sig i rymden..."
+                            className="w-full min-h-[38px] rounded-xl bg-[#16161a] border border-white/[0.09] px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#e11d48] transition-colors"
+                          />
+
+                          {/* Submit steered search */}
+                          <button
+                            type="button"
+                            disabled={isLoading}
+                            onClick={() => handleSubmitSteering(rec)}
+                            className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#e11d48] hover:bg-[#be123c] disabled:opacity-60 text-xs font-semibold text-white flex items-center justify-center gap-2 shadow-md shadow-[#e11d48]/20 active:scale-[0.99] transition-all cursor-pointer"
+                          >
+                            {isLoading ? (
+                              <>
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                                <span>Söker vidare...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Compass className="w-4 h-4" />
+                                <span className="truncate">
+                                  Sök vidare från {rec.title}
+                                </span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </article>
               );
             })}

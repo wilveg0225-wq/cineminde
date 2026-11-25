@@ -20,6 +20,7 @@ import {
   WatchedMovie,
   MovieRecommendation,
   EveningPreferences,
+  MovieSteeringContext,
   TmdbMovieEnrichment,
   DEFAULT_WATCHED_MOVIES,
   DEFAULT_TASTE_PROFILE,
@@ -29,6 +30,7 @@ import {
   generateSmartFallbackRecommendations,
   generateSmartFallbackTasteProfile,
   lookupCuratedTmdbMovie,
+  inferAgeRatingFromGenres,
 } from "./utils/movieLogic";
 
 const STORAGE_KEYS = {
@@ -66,7 +68,7 @@ function loadInitialStreamingProviders(): string[] {
 
 function enrichWatchedWithCurated(movies: WatchedMovie[]): WatchedMovie[] {
   return movies.map((m) => {
-    const meta = lookupCuratedTmdbMovie(m.title, m.year);
+    const meta = lookupCuratedTmdbMovie(m.originalTitle || m.title, m.year);
     return {
       ...m,
       year: m.year || meta.year,
@@ -74,6 +76,10 @@ function enrichWatchedWithCurated(movies: WatchedMovie[]): WatchedMovie[] {
       posterPath: m.posterPath || meta.posterPath,
       tmdbRating: m.tmdbRating || meta.voteAverage,
       swedishProviders: m.swedishProviders || meta.swedishProviders,
+      ageRating:
+        m.ageRating ||
+        meta.ageRating ||
+        inferAgeRatingFromGenres(m.tmdbGenreIds || meta.tmdbGenreIds),
     };
   });
 }
@@ -90,6 +96,10 @@ function enrichRecsWithCurated(
       posterPath: r.posterPath || meta.posterPath,
       tmdbRating: r.tmdbRating || meta.voteAverage,
       swedishProviders: r.swedishProviders || meta.swedishProviders,
+      ageRating:
+        r.ageRating ||
+        meta.ageRating ||
+        inferAgeRatingFromGenres(r.tmdbGenreIds || meta.tmdbGenreIds),
     };
   });
 }
@@ -98,18 +108,16 @@ function loadInitialWatched(): WatchedMovie[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.WATCHED);
     if (raw === null) {
-      localStorage.setItem(
-        STORAGE_KEYS.WATCHED,
-        JSON.stringify(DEFAULT_WATCHED_MOVIES)
-      );
-      return DEFAULT_WATCHED_MOVIES;
+      const initial = enrichWatchedWithCurated(DEFAULT_WATCHED_MOVIES);
+      localStorage.setItem(STORAGE_KEYS.WATCHED, JSON.stringify(initial));
+      return initial;
     }
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed)
       ? enrichWatchedWithCurated(parsed)
-      : DEFAULT_WATCHED_MOVIES;
+      : enrichWatchedWithCurated(DEFAULT_WATCHED_MOVIES);
   } catch {
-    return DEFAULT_WATCHED_MOVIES;
+    return enrichWatchedWithCurated(DEFAULT_WATCHED_MOVIES);
   }
 }
 
@@ -194,6 +202,9 @@ export default function App() {
 
   const [isLoadingRecs, setIsLoadingRecs] = useState(false);
   const [recsError, setRecsError] = useState<string | null>(null);
+  const [activeSteering, setActiveSteering] =
+    useState<MovieSteeringContext | null>(null);
+  const [seenTonightTitles, setSeenTonightTitles] = useState<string[]>([]);
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   const [rateDraft, setRateDraft] = useState<RateMovieDraft | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -210,6 +221,7 @@ export default function App() {
   tasteProfileSummaryRef.current = tasteProfileSummary;
   const dislikedCategoriesRef = useRef(dislikedCategories);
   dislikedCategoriesRef.current = dislikedCategories;
+  const recsAbortControllerRef = useRef<AbortController | null>(null);
 
   // Firebase Auth & Real-time Firestore Cloud Sync
   useEffect(() => {
@@ -346,7 +358,7 @@ export default function App() {
     const runBackgroundEnrichment = async () => {
       const titlesToEnrich = new Map<string, { title: string; year?: string }>();
       for (const w of watchedMovies) {
-        if (!w.posterPath || !w.swedishProviders) {
+        if (!w.posterPath || !w.swedishProviders || !w.ageRating) {
           titlesToEnrich.set(normalizeMovieTitle(w.title), {
             title: w.originalTitle || w.title,
             year: w.year,
@@ -354,7 +366,7 @@ export default function App() {
         }
       }
       for (const wl of watchlist) {
-        if (!wl.posterPath || !wl.swedishProviders) {
+        if (!wl.posterPath || !wl.swedishProviders || !wl.ageRating) {
           titlesToEnrich.set(normalizeMovieTitle(wl.title), {
             title: wl.originalTitle || wl.title,
             year: wl.year,
@@ -362,7 +374,7 @@ export default function App() {
         }
       }
       for (const r of recommendations) {
-        if (!r.posterPath || !r.swedishProviders) {
+        if (!r.posterPath || !r.swedishProviders || !r.ageRating) {
           titlesToEnrich.set(normalizeMovieTitle(r.title), {
             title: r.originalTitle || r.title,
             year: r.year,
@@ -418,6 +430,7 @@ export default function App() {
               posterPath: hit.posterPath || m.posterPath,
               tmdbRating: hit.voteAverage || m.tmdbRating,
               swedishProviders: hit.swedishProviders || m.swedishProviders,
+              ageRating: hit.ageRating || m.ageRating,
             };
           })
         );
@@ -433,6 +446,7 @@ export default function App() {
               posterPath: hit.posterPath || m.posterPath,
               tmdbRating: hit.voteAverage || m.tmdbRating,
               swedishProviders: hit.swedishProviders || m.swedishProviders,
+              ageRating: hit.ageRating || m.ageRating,
             };
           })
         );
@@ -448,6 +462,7 @@ export default function App() {
               posterPath: hit.posterPath || m.posterPath,
               tmdbRating: hit.voteAverage || m.tmdbRating,
               swedishProviders: hit.swedishProviders || m.swedishProviders,
+              ageRating: hit.ageRating || m.ageRating,
             };
           })
         );
@@ -469,9 +484,40 @@ export default function App() {
     }, 3000);
   };
 
-  const handleFindMovies = async () => {
+  const fetchTonightRecommendations = async (
+    steeringOverride: MovieSteeringContext | null
+  ) => {
+    // Avbryt ev. pågående äldre sökning så snabba klick aldrig skriver över nya resultat
+    recsAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    recsAbortControllerRef.current = controller;
+
     setIsLoadingRecs(true);
     setRecsError(null);
+    setActiveSteering(steeringOverride);
+
+    const currentTitles = recommendations.map((r) => r.title);
+    const allPrevious = Array.from(
+      new Set([
+        ...(steeringOverride ? seenTonightTitles : []),
+        ...currentTitles,
+        ...(steeringOverride?.anchorMovie?.title
+          ? [steeringOverride.anchorMovie.title]
+          : []),
+      ])
+    ).slice(-60);
+
+    if (steeringOverride) {
+      setSeenTonightTitles(allPrevious);
+    } else {
+      setSeenTonightTitles(currentTitles);
+    }
+
+    const effectivePreferences: EveningPreferences = {
+      ...preferences,
+      steering: steeringOverride,
+    };
+
     try {
       const storedTmdbKey = localStorage.getItem("tmdbApiKey") || "";
       const headers: Record<string, string> = {
@@ -484,21 +530,26 @@ export default function App() {
       const response = await fetch("/api/recommendations", {
         method: "POST",
         headers,
+        signal: controller.signal,
         body: JSON.stringify({
           watchedMovies,
           watchlist,
           tasteProfileSummary,
-          preferences,
+          preferences: effectivePreferences,
           dislikedCategories,
-          previousTitles: recommendations.map((r) => r.title),
+          previousTitles: allPrevious,
         }),
       });
+
+      if (controller.signal.aborted) return;
 
       if (!response.ok) {
         throw new Error("Kunde inte hämta rekommendationer");
       }
 
       const data = await response.json();
+      if (controller.signal.aborted) return;
+
       if (Array.isArray(data.recommendations) && data.recommendations.length > 0) {
         const clean = filterDuplicateRecommendations(
           data.recommendations,
@@ -507,12 +558,20 @@ export default function App() {
         );
         if (clean.length > 0) {
           setRecommendations(enrichRecsWithCurated(clean));
+          if (steeringOverride) {
+            setSeenTonightTitles((prev) =>
+              Array.from(
+                new Set([...prev, ...clean.map((c) => c.title)])
+              ).slice(-60)
+            );
+          }
         } else {
           const fallback = generateSmartFallbackRecommendations(
             watchedMovies,
             watchlist,
-            preferences,
-            dislikedCategories
+            effectivePreferences,
+            dislikedCategories,
+            allPrevious
           );
           setRecommendations(fallback);
         }
@@ -520,22 +579,43 @@ export default function App() {
         const fallback = generateSmartFallbackRecommendations(
           watchedMovies,
           watchlist,
-          preferences,
-          dislikedCategories
+          effectivePreferences,
+          dislikedCategories,
+          allPrevious
         );
         setRecommendations(fallback);
       }
-    } catch {
+    } catch (err) {
+      if (
+        controller.signal.aborted ||
+        (err instanceof DOMException && err.name === "AbortError")
+      ) {
+        return;
+      }
+      setRecsError(
+        "Kunde inte nå servern just nu – visar reservförslag i stället."
+      );
       const fallback = generateSmartFallbackRecommendations(
         watchedMovies,
         watchlist,
-        preferences,
-        dislikedCategories
+        effectivePreferences,
+        dislikedCategories,
+        allPrevious
       );
       setRecommendations(fallback);
     } finally {
-      setIsLoadingRecs(false);
+      if (recsAbortControllerRef.current === controller) {
+        setIsLoadingRecs(false);
+      }
     }
+  };
+
+  const handleFindMovies = async () => {
+    await fetchTonightRecommendations(null);
+  };
+
+  const handleSteerFromMovie = async (steering: MovieSteeringContext) => {
+    await fetchTonightRecommendations(steering);
   };
 
   const handleAddToWatchlist = async (movie: MovieRecommendation) => {
@@ -611,6 +691,7 @@ export default function App() {
       tmdbRating: movie.tmdbRating,
       swedishProviders: movie.swedishProviders,
       seasonCount: movie.seasonCount,
+      ageRating: movie.ageRating,
     });
   };
 
@@ -629,6 +710,7 @@ export default function App() {
       tmdbRating: movie.tmdbRating,
       swedishProviders: movie.swedishProviders,
       seasonCount: movie.seasonCount,
+      ageRating: movie.ageRating,
     });
   };
 
@@ -877,6 +959,9 @@ export default function App() {
               isLoading={isLoadingRecs}
               error={recsError}
               onFindMovies={handleFindMovies}
+              onSteerFromMovie={handleSteerFromMovie}
+              activeSteering={activeSteering}
+              onClearSteering={() => setActiveSteering(null)}
               onAddToWatchlist={handleAddToWatchlist}
               onMarkAsWatched={handleOpenRateFromRecommendation}
               watchlist={watchlist}

@@ -35,6 +35,7 @@ export interface RateMovieDraft {
   tmdbRating?: number;
   swedishProviders?: SwedishWatchProviders;
   seasonCount?: number;
+  ageRating?: string;
 }
 
 interface RateMovieModalProps {
@@ -369,6 +370,7 @@ export const RateMovieModal: React.FC<RateMovieModalProps> = ({
           posterPath: draft.posterPath,
           tmdbRating: draft.tmdbRating,
           swedishProviders: draft.swedishProviders,
+          ageRating: draft.ageRating || curatedMeta?.ageRating,
         },
         draft.id,
         draft.fromWatchlistId
@@ -390,6 +392,7 @@ export const RateMovieModal: React.FC<RateMovieModalProps> = ({
           posterPath: draft.posterPath,
           tmdbRating: draft.tmdbRating,
           swedishProviders: draft.swedishProviders,
+          ageRating: draft.ageRating || curatedMeta?.ageRating,
         },
         draft.id,
         draft.fromWatchlistId

@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeMovieTitle,
+  getMovieFranchiseKey,
+  limitOnePerFranchise,
   normalizeProviderKey,
   movieMatchesStreamingProviders,
   isMovieExcluded,
@@ -26,6 +28,21 @@ import {
   MovieRecommendation,
   getSeriesSeasonCount,
   KNOWN_SERIES_SEASON_COUNTS,
+  GENRE_GROUPS,
+  CONTENT_GROUPS,
+  SETTING_GROUPS,
+  MOOD_GROUPS,
+  formatSelectedChipsWithContext,
+  extractTmdbVerificationRules,
+  extractTmdbDiscoverFilters,
+  resolveEffectiveMediaType,
+  parseRuntimeMinutes,
+  formatRuntimeMinutes,
+  hasNonLatinScript,
+  normalizeSwedishAgeRating,
+  parseTmdbMovieAgeRating,
+  parseTmdbTvAgeRating,
+  inferAgeRatingFromGenres,
 } from "./movieLogic";
 
 test("normalizeMovieTitle normalizes casing, accents, and punctuation", () => {
@@ -946,4 +963,628 @@ test("lookupCuratedTmdbMovie identifies series mediaType and seasonCount", () =>
 
   const movie = lookupCuratedTmdbMovie("Inception");
   assert.notEqual(movie.mediaType, "tv");
+});
+
+test("Subcategories are concise, single-concept, and verified by TMDB rules", () => {
+  const allGroups = [
+    ...GENRE_GROUPS,
+    ...CONTENT_GROUPS,
+    ...SETTING_GROUPS,
+    ...MOOD_GROUPS,
+  ];
+
+  for (const group of allGroups) {
+    for (const sub of group.subchips) {
+      assert.ok(
+        !sub.includes("(") && !sub.includes(")"),
+        `Subcategory "${sub}" should not contain parentheses`
+      );
+      assert.ok(
+        !sub.includes("&") && !sub.includes("/"),
+        `Subcategory "${sub}" should not combine multiple concepts with & or /`
+      );
+      assert.ok(
+        sub.length <= 24,
+        `Subcategory "${sub}" should be concise (<= 24 chars)`
+      );
+    }
+  }
+
+  const checkEra = verifyMovieAgainstTmdbCategories(
+    { year: "1985", runtime: "1 tim 56 min", tmdbGenreIds: [878, 12] },
+    { moods: [], genres: ["Tidsresor"], contents: [], frameworks: ["1980-talet"], customText: "" }
+  );
+  assert.equal(checkEra.verified, true);
+
+  const checkMini = verifyMovieAgainstTmdbCategories(
+    { year: "2019", runtime: "1 säsong · 5 avsnitt", tmdbGenreIds: [18] },
+    { moods: ["Miniserie"], genres: [], contents: [], frameworks: [], customText: "" }
+  );
+  assert.equal(checkMini.verified, true);
+
+  const checkMiniReject = verifyMovieAgainstTmdbCategories(
+    { year: "2011", runtime: "8 säsonger", tmdbGenreIds: [18] },
+    { moods: ["Miniserie"], genres: [], contents: [], frameworks: [], customText: "" }
+  );
+  assert.equal(checkMiniReject.verified, false);
+});
+
+test("New categories and subcategories map to TMDB rules and include parent context in AI prompts", () => {
+  // 1. Parent context formatting for AI prompts
+  assert.deepEqual(
+    formatSelectedChipsWithContext(["Natur", "Marvel"], GENRE_GROUPS),
+    ["Natur (Dokumentär)", "Marvel (Superhjältar)"]
+  );
+  assert.deepEqual(
+    formatSelectedChipsWithContext(["Sverige", "Sjukhus"], SETTING_GROUPS),
+    ["Sverige (Sverige & Norden)", "Sjukhus (Skola & Jobb)"]
+  );
+  assert.deepEqual(
+    formatSelectedChipsWithContext(["Slökolla"], MOOD_GROUPS),
+    ["Slökolla (Feelgood & Mys)"]
+  );
+
+  // 2. Dokumentär & Natur verify TMDB genre 99
+  const docPass = verifyMovieAgainstTmdbCategories(
+    { year: "2020", tmdbGenreIds: [99] },
+    { moods: [], genres: ["Natur"], contents: [], frameworks: [], customText: "" }
+  );
+  assert.equal(docPass.verified, true);
+  const docFail = verifyMovieAgainstTmdbCategories(
+    { year: "2020", tmdbGenreIds: [28, 53] },
+    { moods: [], genres: ["Natur"], contents: [], frameworks: [], customText: "" }
+  );
+  assert.equal(docFail.verified, false);
+
+  // 3. Familj & Julfilm verify TMDB Family (10751) and reject unrelated R-rated comedy
+  const familyPass = verifyMovieAgainstTmdbCategories(
+    { year: "2014", tmdbGenreIds: [35, 12, 10751] },
+    { moods: [], genres: ["Familj"], contents: [], frameworks: [], customText: "" }
+  );
+  assert.equal(familyPass.verified, true);
+  const familyReject = verifyMovieAgainstTmdbCategories(
+    { year: "2009", tmdbGenreIds: [35] },
+    { moods: [], genres: ["Familj"], contents: [], frameworks: [], customText: "" }
+  );
+  assert.equal(familyReject.verified, false);
+
+  // 4. Musikal verifies Music (10402) on movies and allows Drama/Comedy on TV (where 10402 doesn't exist)
+  const musicalMoviePass = verifyMovieAgainstTmdbCategories(
+    { year: "2016", mediaType: "movie", tmdbGenreIds: [35, 18, 10749, 10402] },
+    { moods: [], genres: ["Musikal"], contents: [], frameworks: [], customText: "" }
+  );
+  assert.equal(musicalMoviePass.verified, true);
+  const musicalMovieReject = verifyMovieAgainstTmdbCategories(
+    { year: "2016", mediaType: "movie", tmdbGenreIds: [28, 53] },
+    { moods: [], genres: ["Musikal"], contents: [], frameworks: [], customText: "" }
+  );
+  assert.equal(musicalMovieReject.verified, false);
+  const musicalTvPass = verifyMovieAgainstTmdbCategories(
+    { year: "2015", mediaType: "tv", tmdbGenreIds: [35, 18] },
+    { moods: [], genres: ["Musikal"], contents: [], frameworks: [], customText: "" }
+  );
+  assert.equal(musicalTvPass.verified, true);
+
+  // 5. Every GENRE_GROUPS main label and subchip produces at least one TMDB rule
+  for (const group of GENRE_GROUPS) {
+    const mainRules = extractTmdbVerificationRules({
+      moods: [],
+      genres: [group.label],
+      contents: [],
+      frameworks: [],
+      customText: "",
+    });
+    assert.ok(
+      mainRules.genreRules.length > 0,
+      `Main genre "${group.label}" must produce a TMDB verification rule`
+    );
+    for (const sub of group.subchips) {
+      const subRules = extractTmdbVerificationRules({
+        moods: [],
+        genres: [sub],
+        contents: [],
+        frameworks: [],
+        customText: "",
+      });
+      assert.ok(
+        subRules.genreRules.length > 0,
+        `Genre subcategory "${sub}" (under ${group.label}) must produce a TMDB verification rule`
+      );
+    }
+  }
+
+  // 6. Prompt includes parent context for selected subcategories
+  const prompt = buildRecommendationSystemPrompt([], [], "", {
+    moods: ["Slökolla"],
+    genres: ["Natur"],
+    contents: ["Maktspel"],
+    frameworks: ["Sverige"],
+    customText: "",
+  });
+  assert.ok(prompt.includes("Natur (Dokumentär)"));
+  assert.ok(prompt.includes("Maktspel (Makt & Politik)"));
+  assert.ok(prompt.includes("Sverige (Sverige & Norden)"));
+  assert.ok(prompt.includes("Slökolla (Feelgood & Mys)"));
+});
+
+test("Age ratings: normalizes Swedish and international certifications and parses TMDB payloads", () => {
+  assert.equal(normalizeSwedishAgeRating("Btl"), "Btl");
+  assert.equal(normalizeSwedishAgeRating("Barntillåten"), "Btl");
+  assert.equal(normalizeSwedishAgeRating("7"), "7+");
+  assert.equal(normalizeSwedishAgeRating("11 år"), "11+");
+  assert.equal(normalizeSwedishAgeRating("15"), "15+");
+  assert.equal(normalizeSwedishAgeRating("PG-13"), "11+");
+  assert.equal(normalizeSwedishAgeRating("R"), "15+");
+  assert.equal(normalizeSwedishAgeRating("TV-MA"), "15+");
+  assert.equal(normalizeSwedishAgeRating("G"), "Btl");
+  assert.equal(normalizeSwedishAgeRating("NR"), undefined);
+
+  // Movie release_dates prefers SE over US
+  const moviePayload = {
+    results: [
+      { iso_3166_1: "US", release_dates: [{ certification: "R" }] },
+      { iso_3166_1: "SE", release_dates: [{ certification: "11" }] },
+    ],
+  };
+  assert.equal(parseTmdbMovieAgeRating(moviePayload), "11+");
+
+  // Falls back to US if SE is empty
+  const movieFallbackPayload = {
+    results: [
+      { iso_3166_1: "SE", release_dates: [{ certification: "" }] },
+      { iso_3166_1: "US", release_dates: [{ certification: "PG-13" }] },
+    ],
+  };
+  assert.equal(parseTmdbMovieAgeRating(movieFallbackPayload), "11+");
+
+  // TV content_ratings prefers SE over US
+  const tvPayload = {
+    results: [
+      { iso_3166_1: "US", rating: "TV-14" },
+      { iso_3166_1: "SE", rating: "15" },
+    ],
+  };
+  assert.equal(parseTmdbTvAgeRating(tvPayload), "15+");
+
+  // Fallback inference & smart recommendations always include ageRating
+  assert.equal(inferAgeRatingFromGenres([27]), "15+");
+  assert.equal(inferAgeRatingFromGenres([10762]), "Btl");
+
+  const fallbackRecs = generateSmartFallbackRecommendations(
+    DEFAULT_WATCHED_MOVIES,
+    [],
+    { moods: [], genres: [], contents: [], frameworks: [], customText: "" }
+  );
+  assert.ok(fallbackRecs.length > 0);
+  for (const rec of fallbackRecs) {
+    assert.ok(rec.ageRating, `Recommendation "${rec.title}" should have an ageRating`);
+  }
+});
+
+test("Strict genre rules: Familj rejects adult anime, Dokumentär subchips require 99, Musikal subchips require 10402", () => {
+  // Adult anime (Animation 16 + Action 28, no Family 10751) MUST fail Familj
+  const chainsawMan = { year: "2025", mediaType: "movie" as const, tmdbGenreIds: [16, 28, 14] };
+  const paddington = { year: "2017", mediaType: "movie" as const, tmdbGenreIds: [12, 35, 10751] };
+  for (const chip of ["Familj", "Barnfilm", "Djur", "Sagovärld", "Julfilm"]) {
+    assert.equal(
+      verifyMovieAgainstTmdbCategories(chainsawMan, { moods: [], genres: [chip], contents: [], frameworks: [], customText: "" }).verified,
+      false,
+      `Adult anime must be rejected for "${chip}"`
+    );
+    assert.equal(
+      verifyMovieAgainstTmdbCategories(paddington, { moods: [], genres: [chip], contents: [], frameworks: [], customText: "" }).verified,
+      true,
+      `Family movie must pass "${chip}"`
+    );
+  }
+
+  // Dokumentär subchips must require 99
+  const featureDrama = { year: "2014", mediaType: "movie" as const, tmdbGenreIds: [18, 36] };
+  const realDoc = { year: "2020", mediaType: "movie" as const, tmdbGenreIds: [99] };
+  for (const chip of ["Dokumentär", "Natur", "Vetenskap", "Historia", "Sport", "Musik"]) {
+    assert.equal(
+      verifyMovieAgainstTmdbCategories(featureDrama, { moods: [], genres: [chip], contents: [], frameworks: [], customText: "" }).verified,
+      false,
+      `Feature drama without 99 must be rejected for Documentary subchip "${chip}"`
+    );
+    assert.equal(
+      verifyMovieAgainstTmdbCategories(realDoc, { moods: [], genres: [chip], contents: [], frameworks: [], customText: "" }).verified,
+      true,
+      `Documentary (99) must pass "${chip}"`
+    );
+  }
+
+  // Musikal subchips Dansfilm & Musikbiografi must require 10402 on movies
+  const plainDrama = { year: "1994", mediaType: "movie" as const, tmdbGenreIds: [18, 80] };
+  const musicBio = { year: "2018", mediaType: "movie" as const, tmdbGenreIds: [18, 10402] };
+  for (const chip of ["Dansfilm", "Musikbiografi"]) {
+    assert.equal(
+      verifyMovieAgainstTmdbCategories(plainDrama, { moods: [], genres: [chip], contents: [], frameworks: [], customText: "" }).verified,
+      false
+    );
+    assert.equal(
+      verifyMovieAgainstTmdbCategories(musicBio, { moods: [], genres: [chip], contents: [], frameworks: [], customText: "" }).verified,
+      true
+    );
+  }
+
+  // Action > Kupp requires Action (28)
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(plainDrama, { moods: [], genres: ["Kupp"], contents: [], frameworks: [], customText: "" }).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ year: "2010", mediaType: "movie", tmdbGenreIds: [28, 80, 53] }, { moods: [], genres: ["Kupp"], contents: [], frameworks: [], customText: "" }).verified,
+    true
+  );
+});
+
+test("Hybrid subcategories enforce AND-logic across both component genres", () => {
+  // Romantisk komedi requires 35 AND 10749
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ year: "2019", tmdbGenreIds: [35, 53] }, { moods: [], genres: ["Romantisk komedi"], contents: [], frameworks: [], customText: "" }).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ year: "1999", tmdbGenreIds: [35, 10749] }, { moods: [], genres: ["Romantisk komedi"], contents: [], frameworks: [], customText: "" }).verified,
+    true
+  );
+
+  // Sci-Fi-skräck requires 878 AND 27
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ year: "2018", tmdbGenreIds: [27] }, { moods: [], genres: ["Sci-Fi-skräck"], contents: [], frameworks: [], customText: "" }).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ year: "1979", tmdbGenreIds: [27, 878] }, { moods: [], genres: ["Sci-Fi-skräck"], contents: [], frameworks: [], customText: "" }).verified,
+    true
+  );
+
+  // Skräckkomedi requires 27 AND 35
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ year: "2004", tmdbGenreIds: [27, 35] }, { moods: [], genres: ["Skräckkomedi"], contents: [], frameworks: [], customText: "" }).verified,
+    true
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ year: "2018", tmdbGenreIds: [27, 9648] }, { moods: [], genres: ["Skräckkomedi"], contents: [], frameworks: [], customText: "" }).verified,
+    false
+  );
+
+  // Familjekomedi requires 10751 AND 35
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ year: "2017", tmdbGenreIds: [10751, 35] }, { moods: [], genres: ["Familjekomedi"], contents: [], frameworks: [], customText: "" }).verified,
+    true
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ year: "2001", tmdbGenreIds: [16, 14] }, { moods: [], genres: ["Familjekomedi"], contents: [], frameworks: [], customText: "" }).verified,
+    false
+  );
+});
+
+test("All CONTENT_GROUPS main labels & subchips produce TMDB rules and duplicate chip Verkliga brott preserves parent context", () => {
+  for (const group of CONTENT_GROUPS) {
+    const mainRules = extractTmdbVerificationRules({
+      moods: [],
+      genres: [],
+      contents: [group.label],
+      frameworks: [],
+      customText: "",
+    });
+    assert.ok(
+      mainRules.genreRules.length > 0,
+      `CONTENT_GROUPS main label "${group.label}" must produce a TMDB rule`
+    );
+    for (const sub of group.subchips) {
+      const subRules = extractTmdbVerificationRules({
+        moods: [],
+        genres: [],
+        contents: [sub],
+        frameworks: [],
+        customText: "",
+      });
+      assert.ok(
+        subRules.genreRules.length > 0,
+        `CONTENT_GROUPS subchip "${sub}" (under ${group.label}) must produce a TMDB rule`
+      );
+    }
+  }
+
+  assert.deepEqual(
+    formatSelectedChipsWithContext(["Verkliga brott"], GENRE_GROUPS),
+    ["Verkliga brott (Krim & Mysterium / Dokumentär)"]
+  );
+});
+
+test("Series length chips force mediaType='tv' and strictly verify seasonCount, episodeRuntimeMinutes, and tvStatus", () => {
+  for (const chip of ["Miniserie", "1–2 säsonger", "3–5 säsonger", "6+ säsonger", "Korta avsnitt", "Avslutad serie", "Serielängd"]) {
+    assert.equal(
+      resolveEffectiveMediaType({ moods: [chip], genres: [], contents: [], frameworks: [], customText: "", mediaType: "any" }),
+      "tv",
+      `"${chip}" must force mediaType to 'tv' when mediaType is 'any'`
+    );
+  }
+
+  // Reject movie when 3–5 säsonger is chosen
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { year: "2014", mediaType: "movie", tmdbGenreIds: [80, 18] },
+      { moods: ["3–5 säsonger"], genres: [], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    false
+  );
+
+  // Verify numeric seasonCount strictly for 3–5 säsonger
+  const pref3to5 = { moods: ["3–5 säsonger"], genres: [], contents: [], frameworks: [], customText: "" };
+  assert.equal(verifyMovieAgainstTmdbCategories({ mediaType: "tv", seasonCount: 1 }, pref3to5).verified, false);
+  assert.equal(verifyMovieAgainstTmdbCategories({ mediaType: "tv", seasonCount: 4 }, pref3to5).verified, true);
+  assert.equal(verifyMovieAgainstTmdbCategories({ mediaType: "tv", seasonCount: 7 }, pref3to5).verified, false);
+
+  // Verify Korta avsnitt (<= 35 min) and Avslutad serie (Ended/Canceled)
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { mediaType: "tv", episodeRuntimeMinutes: 22 },
+      { moods: ["Korta avsnitt"], genres: [], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    true
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { mediaType: "tv", episodeRuntimeMinutes: 55 },
+      { moods: ["Korta avsnitt"], genres: [], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { mediaType: "tv", tvStatus: "Ended" },
+      { moods: ["Avslutad serie"], genres: [], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    true
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { mediaType: "tv", tvStatus: "Returning Series" },
+      { moods: ["Avslutad serie"], genres: [], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    false
+  );
+});
+
+test("Movie runtime filters force mediaType='movie' and verify runtimeMinutes", () => {
+  assert.equal(
+    resolveEffectiveMediaType({ moods: ["Max 90 min"], genres: [], contents: [], frameworks: [], customText: "", mediaType: "any" }),
+    "movie"
+  );
+  assert.equal(parseRuntimeMinutes("1 tim 28 min"), 88);
+  assert.equal(parseRuntimeMinutes("2 tim 12 min"), 132);
+  assert.equal(formatRuntimeMinutes(88), "1 tim 28 min");
+  assert.equal(formatRuntimeMinutes(120), "2 tim");
+
+  const max90Pref = { moods: ["Max 90 min"], genres: ["Komedi"], contents: [], frameworks: [], customText: "" };
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ mediaType: "movie", runtimeMinutes: 132, tmdbGenreIds: [35] }, max90Pref).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ mediaType: "movie", runtimeMinutes: 86, tmdbGenreIds: [35] }, max90Pref).verified,
+    true
+  );
+
+  const over2hPref = { moods: ["Över 2 tim"], genres: [], contents: [], frameworks: [], customText: "" };
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ mediaType: "movie", runtimeMinutes: 95 }, over2hPref).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories({ mediaType: "movie", runtimeMinutes: 148 }, over2hPref).verified,
+    true
+  );
+});
+
+test("extractTmdbDiscoverFilters maps Anime, Natur, Kostymdrama, London, Tokyo, runtime & detects non-Latin titles", () => {
+  const animeFilters = extractTmdbDiscoverFilters({ moods: [], genres: ["Anime", "Familj"], contents: [], frameworks: [], customText: "" });
+  assert.deepEqual(animeFilters.originalLanguages, ["ja"]);
+  assert.deepEqual(animeFilters.originCountries, ["JP"]);
+
+  // Anime verification rejects non-Japanese originalLanguage
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { mediaType: "movie", tmdbGenreIds: [16, 10751], originalLanguage: "en" },
+      { moods: [], genres: ["Anime", "Familj"], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { mediaType: "movie", tmdbGenreIds: [16, 10751], originalLanguage: "ja" },
+      { moods: [], genres: ["Anime", "Familj"], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    true
+  );
+
+  const naturFilters = extractTmdbDiscoverFilters({ moods: [], genres: ["Dokumentär", "Natur"], contents: [], frameworks: [], customText: "" });
+  assert.ok(naturFilters.keywordGroups.some((g) => g.includes(18330)));
+
+  const londonFilters = extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["London"], customText: "" });
+  assert.ok(londonFilters.keywordGroups.some((g) => g.includes(212)));
+
+  const max90Filters = extractTmdbDiscoverFilters({ moods: ["Max 90 min"], genres: [], contents: [], frameworks: [], customText: "" });
+  assert.equal(max90Filters.maxRuntime, 90);
+
+  assert.equal(hasNonLatinScript("เลือดรักนักฆ่า"), true);
+  assert.equal(hasNonLatinScript("Män som hatar kvinnor"), false);
+});
+
+test("Round 2: Mysterium requires 9648, Verkliga brott requires 99, Forntid requires 36, plus companies & verified keywords", () => {
+  // Thriller > Mysterium requires 9648
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { year: "2020", tmdbGenreIds: [53, 28] },
+      { moods: [], genres: ["Mysterium"], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { year: "2020", tmdbGenreIds: [53, 9648] },
+      { moods: [], genres: ["Mysterium"], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    true
+  );
+
+  // Verkliga brott requires 99
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { year: "2008", tmdbGenreIds: [80, 18] },
+      { moods: [], genres: ["Verkliga brott"], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { year: "2020", tmdbGenreIds: [99, 80] },
+      { moods: [], genres: ["Verkliga brott"], contents: [], frameworks: [], customText: "" }
+    ).verified,
+    true
+  );
+
+  // Forntid & Medeltid requires 36 (Historia) and rejects Spider-Man [28, 12, 878]
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { year: "2026", tmdbGenreIds: [28, 12, 878] },
+      { moods: [], genres: [], contents: [], frameworks: ["Forntid & Medeltid"], customText: "" }
+    ).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { year: "2005", tmdbGenreIds: [18, 28, 36] },
+      { moods: [], genres: [], contents: [], frameworks: ["Forntid & Medeltid"], customText: "" }
+    ).verified,
+    true
+  );
+
+  // Studio companies
+  assert.deepEqual(extractTmdbDiscoverFilters({ moods: [], genres: ["Studio Ghibli"], contents: [], frameworks: [], customText: "" }).companyIds, [10342]);
+  assert.deepEqual(extractTmdbDiscoverFilters({ moods: [], genres: ["Pixar"], contents: [], frameworks: [], customText: "" }).companyIds, [3]);
+  assert.deepEqual(extractTmdbDiscoverFilters({ moods: [], genres: ["Disney"], contents: [], frameworks: [], customText: "" }).companyIds, [2, 6125]);
+  assert.deepEqual(extractTmdbDiscoverFilters({ moods: [], genres: ["Marvel"], contents: [], frameworks: [], customText: "" }).companyIds, [420]);
+  assert.deepEqual(extractTmdbDiscoverFilters({ moods: [], genres: ["DC"], contents: [], frameworks: [], customText: "" }).companyIds, [9993, 128064]);
+
+  // Verified keywords & protective withoutGenreIds
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Stuga"], customText: "" }).keywordGroups.some((g) => g.includes(3623)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Hotell"], customText: "" }).keywordGroups.some((g) => g.includes(612)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Öken"], customText: "" }).keywordGroups.some((g) => g.includes(18034)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Tåg"], customText: "" }).keywordGroups.some((g) => g.includes(13008)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Bunker"], customText: "" }).keywordGroups.some((g) => g.includes(2321)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Herrgård"], customText: "" }).keywordGroups.some((g) => g.includes(12545)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Vikingatid"], customText: "" }).keywordGroups.some((g) => g.includes(384863)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: ["Kostymdrama"], contents: [], frameworks: [], customText: "" }).keywordGroups.some((g) => g.includes(195013)));
+
+  const feelgoodFilters = extractTmdbDiscoverFilters({ moods: ["Feelgood & Mys"], genres: [], contents: [], frameworks: [], customText: "" });
+  assert.ok(feelgoodFilters.withoutGenreIds.includes(27));
+  assert.ok(feelgoodFilters.withoutGenreIds.includes(53));
+
+  const gemFilters = extractTmdbDiscoverFilters({ moods: ["Dold pärla"], genres: [], contents: [], frameworks: [], customText: "" });
+  assert.equal(gemFilters.minVoteCount, 250);
+  assert.equal(gemFilters.maxVoteCount, 1200);
+  assert.equal(gemFilters.minVoteAverage, 7.4);
+  assert.equal(gemFilters.maxYearOverride, 2024);
+  assert.ok(gemFilters.withoutGenreIds.includes(16));
+  assert.ok(gemFilters.withoutGenreIds.includes(99));
+
+  const shortTvFilters = extractTmdbDiscoverFilters({ moods: ["1–2 säsonger"], genres: [], contents: [], frameworks: [], customText: "" });
+  assert.equal(shortTvFilters.tvShortSeries, true);
+});
+
+test("Round 3: Unicode non-Latin detection (Telugu/Thai), historical withoutKeywordIds, Retro-Sci-Fi, and live-verified keywords", () => {
+  // Non-Latin detection catches Telugu, Thai, Japanese, Cyrillic while passing Swedish/Latin
+  assert.equal(hasNonLatinScript("రౌద్రం రణం రుధిరం"), true);
+  assert.equal(hasNonLatinScript("ఒక్కడు"), true);
+  assert.equal(hasNonLatinScript("เลือดรักนักฆ่า"), true);
+  assert.equal(hasNonLatinScript("Sagan om ringen: Härskarringen"), false);
+
+  // Historical eras exclude WW1/WW2 keywords
+  const ancientFilters = extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Forntid & Medeltid"], customText: "" });
+  assert.ok(ancientFilters.withoutKeywordIds.includes(1956));
+  assert.ok(ancientFilters.withoutKeywordIds.includes(2504));
+  assert.ok(ancientFilters.keywordGroups.some((g) => g.includes(161257)));
+
+  // Retro-Sci-Fi caps year at 1989
+  const retroFilters = extractTmdbDiscoverFilters({ moods: [], genres: ["Retro-Sci-Fi"], contents: [], frameworks: [], customText: "" });
+  assert.equal(retroFilters.maxYearOverride, 1989);
+
+  // Postapokalyps uses 4458 (post-apocalyptic future)
+  const postApoc = extractTmdbDiscoverFilters({ moods: [], genres: ["Postapokalyps"], contents: [], frameworks: [], customText: "" });
+  assert.ok(postApoc.keywordGroups.some((g) => g.includes(4458)));
+
+  // Stockholm, Landsbygd, Kungahus, Makt & Politik, Klurig, Romantisk
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Stockholm"], customText: "" }).keywordGroups.some((g) => g.includes(8085)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: [], frameworks: ["Landsbygd"], customText: "" }).keywordGroups.some((g) => g.includes(548)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: ["Kungahus"], frameworks: [], customText: "" }).keywordGroups.some((g) => g.includes(2471)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: [], genres: [], contents: ["Makt & Politik"], frameworks: [], customText: "" }).keywordGroups.some((g) => g.includes(209817)));
+  assert.ok(extractTmdbDiscoverFilters({ moods: ["Klurig"], genres: [], contents: [], frameworks: [], customText: "" }).withoutGenreIds.includes(28));
+  assert.ok(extractTmdbDiscoverFilters({ moods: ["Romantisk"], genres: [], contents: [], frameworks: [], customText: "" }).withoutGenreIds.includes(16));
+});
+
+test("Franchise deduplication (max 1 per series) and London location keyword without GB country lock", () => {
+  // Harry Potter, Toy Story, Godfather, Frost, Vaiana, Dune all map to canonical franchise keys
+  assert.equal(getMovieFranchiseKey("Harry Potter och de vises sten"), "harry potter");
+  assert.equal(getMovieFranchiseKey("Harry Potter och dödsrelikerna, del 1"), "harry potter");
+  assert.equal(getMovieFranchiseKey("Harry Potter och Halvblodsprinsen"), "harry potter");
+  assert.equal(getMovieFranchiseKey("Toy Story"), "toy story");
+  assert.equal(getMovieFranchiseKey("Toy Story 5"), "toy story");
+  assert.equal(getMovieFranchiseKey("Gudfadern"), "the godfather");
+  assert.equal(getMovieFranchiseKey("Gudfadern del II", "The Godfather Part II"), "the godfather");
+  assert.equal(getMovieFranchiseKey("Frost"), "frozen");
+  assert.equal(getMovieFranchiseKey("Frost 2", "Frozen II"), "frozen");
+  assert.equal(getMovieFranchiseKey("Vaiana"), "moana");
+  assert.equal(getMovieFranchiseKey("Vaiana 2"), "moana");
+  assert.equal(getMovieFranchiseKey("Dune"), "dune");
+  assert.equal(getMovieFranchiseKey("Dune: Part Two"), "dune");
+  // Unrelated titles stay distinct
+  assert.notEqual(getMovieFranchiseKey("1917"), getMovieFranchiseKey("1984"));
+  assert.notEqual(getMovieFranchiseKey("Paddington"), getMovieFranchiseKey("Notting Hill"));
+
+  // limitOnePerFranchise keeps max 1 per franchise in order
+  const deduped = limitOnePerFranchise([
+    { title: "Harry Potter och de vises sten" },
+    { title: "Harry Potter och dödsrelikerna, del 1" },
+    { title: "Paddington" },
+    { title: "Harry Potter och Halvblodsprinsen" },
+    { title: "Notting Hill" },
+    { title: "Paddington 2" },
+  ]);
+  assert.deepEqual(
+    deduped.map((m) => m.title),
+    ["Harry Potter och de vises sten", "Paddington", "Notting Hill"]
+  );
+
+  // London uses location keyword 212 (london, england) WITHOUT locking originCountries to GB or excluding Fantasy
+  const londonFilters = extractTmdbDiscoverFilters({
+    moods: [],
+    genres: [],
+    contents: [],
+    frameworks: ["London"],
+    customText: "",
+  });
+  assert.ok(londonFilters.keywordGroups.some((g) => g.includes(212)));
+  assert.equal(londonFilters.originCountries.length, 0);
+  assert.equal(londonFilters.withoutGenreIds.includes(14), false);
+
+  // Sverige / Stockholm strictly rejects Danish/English titles when originalLanguage is known
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { year: "2021", tmdbGenreIds: [80, 9648], originalLanguage: "da" },
+      { moods: [], genres: ["Krim & Mysterium"], contents: [], frameworks: ["Sverige"], customText: "" }
+    ).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { year: "2021", tmdbGenreIds: [80, 18], originalLanguage: "sv" },
+      { moods: [], genres: ["Krim & Mysterium"], contents: [], frameworks: ["Sverige"], customText: "" }
+    ).verified,
+    true
+  );
 });

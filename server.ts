@@ -20,16 +20,34 @@ import {
   sortMoviesByStreamingServices,
   filterMoviesByStreamingServices,
   mapTmdbGenreIdsToNames,
+  normalizeSwedishAgeRating,
+  parseTmdbMovieAgeRating,
+  parseTmdbTvAgeRating,
+  inferAgeRatingFromGenres,
   filterAndVerifyMoviesByTmdbCategories,
   normalizeProviderKey,
   movieMatchesStreamingProviders,
   extractTmdbVerificationRules,
+  extractTmdbDiscoverFilters,
+  resolveEffectiveMediaType,
+  hasSeriesLengthFilter,
+  hasMovieLengthFilter,
+  formatRuntimeMinutes,
+  hasNonLatinScript,
   normalizeMovieTitle,
+  getMovieFranchiseKey,
   filterOutDislikedCategories,
   getDislikedGenreIds,
   isMovieMatchingDislikedCategories,
   getSeriesSeasonCount,
   KNOWN_SERIES_SEASON_COUNTS,
+  formatSelectedChipsWithContext,
+  describeSteeringAdjustments,
+  buildSteeringPromptLines,
+  GENRE_GROUPS,
+  CONTENT_GROUPS,
+  SETTING_GROUPS,
+  MOOD_GROUPS,
 } from "./src/utils/movieLogic";
 
 dotenv.config();
@@ -52,6 +70,99 @@ function getGenAIClient(): GoogleGenAI | null {
   });
 }
 
+function isTransientGeminiError(err: unknown): boolean {
+  const msg = String(
+    err instanceof Error ? err.message : err || ""
+  ).toLowerCase();
+  const status = (err as { status?: number; code?: number })?.status ??
+    (err as { code?: number })?.code;
+  if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+  return (
+    msg.includes("429") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("quota") ||
+    msg.includes("rate") ||
+    msg.includes("503") ||
+    msg.includes("unavailable") ||
+    msg.includes("timeout") ||
+    msg.includes("aborted") ||
+    msg.includes("econnreset") ||
+    msg.includes("fetch failed")
+  );
+}
+
+async function callGeminiWithFallback(
+  ai: GoogleGenAI,
+  params: {
+    contents: string;
+    systemInstruction?: string;
+    temperature: number;
+    responseMimeType?: string;
+    label?: string;
+  }
+): Promise<string | null> {
+  const modelsToTry: Array<{
+    name: string;
+    timeoutMs: number;
+  }> = [
+    { name: "gemini-3.5-flash-lite", timeoutMs: 18000 },
+    { name: "gemini-3.1-flash-lite-preview", timeoutMs: 18000 },
+    { name: "gemini-flash-lite-latest", timeoutMs: 18000 },
+    { name: "gemini-3.8-flash", timeoutMs: 22000 },
+    { name: "gemini-3.1-flash-lite", timeoutMs: 18000 },
+    { name: "gemini-flash-latest", timeoutMs: 22000 },
+  ];
+
+  const tag = params.label || "generateContent";
+
+  for (const modelSpec of modelsToTry) {
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelSpec.name,
+          contents: params.contents,
+          config: {
+            ...(params.systemInstruction
+              ? { systemInstruction: params.systemInstruction }
+              : {}),
+            responseMimeType: params.responseMimeType || "application/json",
+            temperature: params.temperature,
+            abortSignal: AbortSignal.timeout(modelSpec.timeoutMs),
+          },
+        });
+        const text = response?.text?.trim();
+        if (text) {
+          return text;
+        }
+        console.warn(
+          `[Gemini:${tag}] Empty response from ${modelSpec.name} (attempt ${attempt})`
+        );
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const transient = isTransientGeminiError(err);
+        console.warn(
+          `[Gemini:${tag}] ${modelSpec.name} failed (attempt ${attempt}/${maxAttempts}, transient=${transient}): ${errMsg.slice(
+            0,
+            200
+          )}`
+        );
+        if (!transient) {
+          break; // Immediately move to next model on 400/404/invalid config
+        }
+        if (attempt < maxAttempts) {
+          const backoffMs = 800 * attempt + Math.floor(Math.random() * 500);
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        }
+      }
+    }
+  }
+  console.warn(`[Gemini:${tag}] All models failed; falling back to TMDB/local curator.`);
+  return null;
+}
+
 function getEffectiveTmdbKey(headerKey?: string): string | null {
   const candidate = (headerKey || process.env.TMDB_API_KEY || "").trim();
   if (!candidate || candidate === "MY_TMDB_API_KEY") {
@@ -61,6 +172,40 @@ function getEffectiveTmdbKey(headerKey?: string): string | null {
 }
 
 const tmdbEnrichCache = new Map<string, TmdbMovieEnrichment>();
+const tmdbAgeRatingCache = new Map<string, string>();
+
+async function fetchTmdbAgeRating(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  tmdbKey: string
+): Promise<string | undefined> {
+  if (!tmdbId || tmdbId >= 900000) return undefined;
+  const cacheKey = `${mediaType}:${tmdbId}`;
+  const cached = tmdbAgeRatingCache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const endpoint =
+      mediaType === "tv"
+        ? `/tv/${tmdbId}/content_ratings`
+        : `/movie/${tmdbId}/release_dates`;
+    const data = await fetchFromTmdbApi(endpoint, tmdbKey);
+    const parsed =
+      mediaType === "tv"
+        ? parseTmdbTvAgeRating(data)
+        : parseTmdbMovieAgeRating(data);
+    if (parsed) {
+      if (tmdbAgeRatingCache.size > 1000) {
+        const oldestKey = tmdbAgeRatingCache.keys().next().value;
+        if (oldestKey) tmdbAgeRatingCache.delete(oldestKey);
+      }
+      tmdbAgeRatingCache.set(cacheKey, parsed);
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
 
 async function fetchFromTmdbApi(
   endpointPath: string,
@@ -153,6 +298,26 @@ function pickBestTmdbCandidate(
   })[0];
 }
 
+async function fetchTmdbEnglishTitle(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  tmdbKey: string
+): Promise<string | undefined> {
+  try {
+    const data = (await fetchFromTmdbApi(
+      `/${mediaType}/${tmdbId}?language=en-US`,
+      tmdbKey
+    )) as { title?: string; name?: string };
+    const enTitle = String(data?.title || data?.name || "").trim();
+    if (enTitle && !hasNonLatinScript(enTitle)) {
+      return enTitle;
+    }
+  } catch {
+    // Ignore
+  }
+  return undefined;
+}
+
 async function discoverTmdbCandidates(
   preferences: EveningPreferences,
   selectedServices: string[],
@@ -168,15 +333,76 @@ async function discoverTmdbCandidates(
     const providerIds = hasProviders ? getTmdbProviderIds(selectedServices) : [];
     if (hasProviders && providerIds.length === 0) return [];
 
+    const effectiveMediaType = resolveEffectiveMediaType(preferences);
+    const effectivePreferences: EveningPreferences = {
+      ...preferences,
+      mediaType: effectiveMediaType,
+    };
+
     const typesToQuery: Array<"movie" | "tv"> =
-      preferences.mediaType === "tv"
+      effectiveMediaType === "tv"
         ? ["tv"]
-        : preferences.mediaType === "movie"
+        : effectiveMediaType === "movie"
         ? ["movie"]
         : ["movie", "tv"];
 
     const { genreRules, minYear, maxYear } =
-      extractTmdbVerificationRules(preferences);
+      extractTmdbVerificationRules(effectivePreferences);
+    const discoverFilters = extractTmdbDiscoverFilters(effectivePreferences);
+
+    const allChosenChips = [
+      ...(effectivePreferences.genres || []),
+      ...(effectivePreferences.contents || []),
+      ...(effectivePreferences.frameworks || []),
+      ...(effectivePreferences.moods || []),
+    ];
+    const hasExplicitEveningFilters =
+      allChosenChips.length > 0 || Boolean(effectivePreferences.customText?.trim());
+
+    const originCountryParam =
+      discoverFilters.originCountries.length > 0
+        ? `&with_origin_country=${encodeURIComponent(
+            discoverFilters.originCountries.join("|")
+          )}`
+        : "";
+    const originalLangParam =
+      discoverFilters.originalLanguages.length > 0
+        ? `&with_original_language=${encodeURIComponent(
+            discoverFilters.originalLanguages.join("|")
+          )}`
+        : "";
+    const isRegionalFilter =
+      discoverFilters.originCountries.length > 0 ||
+      discoverFilters.originalLanguages.length > 0;
+
+    // Build keyword & company query strings
+    const companyParam =
+      discoverFilters.companyIds.length > 0
+        ? `&with_companies=${encodeURIComponent(
+            discoverFilters.companyIds.join("|")
+          )}`
+        : "";
+    const keywordParam =
+      discoverFilters.keywordGroups.length > 0
+        ? `&with_keywords=${encodeURIComponent(
+            discoverFilters.keywordGroups
+              .slice(0, 2)
+              .map((grp) => grp.join("|"))
+              .join(",")
+          )}`
+        : "";
+    const softOrKeywordParam =
+      discoverFilters.keywordGroups.length > 1
+        ? `&with_keywords=${encodeURIComponent(
+            Array.from(new Set(discoverFilters.keywordGroups.flat())).join("|")
+          )}`
+        : "";
+    const withoutKeywordParam =
+      discoverFilters.withoutKeywordIds.length > 0
+        ? `&without_keywords=${encodeURIComponent(
+            discoverFilters.withoutKeywordIds.join(",")
+          )}`
+        : "";
 
     const previousNorms = new Set(
       (previousTitles || []).map((t) => normalizeMovieTitle(t)).filter(Boolean)
@@ -190,9 +416,12 @@ async function discoverTmdbCandidates(
         }
       }
     }
+    const combinedWithoutGenres = Array.from(
+      new Set([...dislikedGenreIds, ...discoverFilters.withoutGenreIds])
+    );
     const withoutGenreParam =
-      dislikedGenreIds.length > 0
-        ? `&without_genres=${encodeURIComponent(dislikedGenreIds.join(","))}`
+      combinedWithoutGenres.length > 0
+        ? `&without_genres=${encodeURIComponent(combinedWithoutGenres.join(","))}`
         : "";
 
     let watchParam = "";
@@ -220,6 +449,19 @@ async function discoverTmdbCandidates(
     ];
 
     const initialPage = Math.max(1, Number(startPage) || 1);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const currentYear = new Date().getFullYear();
+    const effectiveMaxYear =
+      maxYear && discoverFilters.maxYearOverride
+        ? Math.min(maxYear, discoverFilters.maxYearOverride)
+        : maxYear ?? discoverFilters.maxYearOverride;
+    const maxDateStr =
+      effectiveMaxYear && effectiveMaxYear < currentYear
+        ? `${effectiveMaxYear}-12-31`
+        : todayStr;
+
+    const needsSeriesDetails = hasSeriesLengthFilter(effectivePreferences);
+    const needsMovieRuntimeDetails = hasMovieLengthFilter(effectivePreferences);
 
     for (const mediaType of typesToQuery) {
       const validSet = new Set(
@@ -237,9 +479,25 @@ async function discoverTmdbCandidates(
         }
       }
 
-      // If no specific evening genres were chosen (e.g. taste profile mode in "För dig"),
+      // If no explicit genreRules exist, use mood/setting fallbackGenreIds so Discover isn't unfiltered
+      const usedFallbackGenres =
+        ruleTokens.length === 0 && discoverFilters.fallbackGenreIds.length > 0;
+      if (usedFallbackGenres) {
+        const validFallback = discoverFilters.fallbackGenreIds.filter(
+          (gid) => validSet.has(gid) && !combinedWithoutGenres.includes(gid)
+        );
+        if (validFallback.length > 0) {
+          ruleTokens.push(validFallback.slice(0, 3).join("|"));
+        }
+      }
+
+      // If no specific evening filters were chosen (e.g. taste profile mode in "För dig"),
       // derive target genres from the user's loved movies (rated >= 4 and liked)
-      if (ruleTokens.length === 0 && watchedMovies.length > 0) {
+      if (
+        ruleTokens.length === 0 &&
+        !hasExplicitEveningFilters &&
+        watchedMovies.length > 0
+      ) {
         const loved = watchedMovies.filter(
           (m) => m.rating >= 4 && m.liked !== false
         );
@@ -266,23 +524,86 @@ async function discoverTmdbCandidates(
           : "";
 
       let yearParam = "";
-      const currentYear = new Date().getFullYear();
       if (mediaType === "movie") {
         if (minYear) yearParam += `&primary_release_date.gte=${minYear}-01-01`;
-        yearParam += `&primary_release_date.lte=${maxYear || currentYear}-12-31`;
+        yearParam += `&primary_release_date.lte=${maxDateStr}`;
       } else {
         if (minYear) yearParam += `&first_air_date.gte=${minYear}-01-01`;
-        yearParam += `&first_air_date.lte=${maxYear || currentYear}-12-31`;
+        yearParam += `&first_air_date.lte=${maxDateStr}`;
       }
 
-      const voteCountMin = hasProviders ? 25 : 100;
+      // Runtime & TV status/type params
+      let extraTypeParam = "";
+      if (mediaType === "movie") {
+        if (discoverFilters.minRuntime) {
+          extraTypeParam += `&with_runtime.gte=${discoverFilters.minRuntime}`;
+        }
+        if (discoverFilters.maxRuntime) {
+          extraTypeParam += `&with_runtime.lte=${discoverFilters.maxRuntime}`;
+        }
+      } else {
+        if (discoverFilters.tvMaxEpisodeRuntime) {
+          extraTypeParam += `&with_runtime.lte=${discoverFilters.tvMaxEpisodeRuntime}`;
+        }
+        if (discoverFilters.tvEndedOnly) {
+          extraTypeParam += `&with_status=${encodeURIComponent("3|4")}`;
+        }
+        if (discoverFilters.tvMiniseriesOnly) {
+          extraTypeParam += `&with_type=2`;
+        } else if (discoverFilters.tvShortSeries) {
+          extraTypeParam += `&with_type=${encodeURIComponent("2|4")}`;
+        }
+      }
+
+      const sortBy =
+        discoverFilters.sortBy ||
+        (usedFallbackGenres && discoverFilters.keywordGroups.length === 0
+          ? "vote_average.desc"
+          : "popularity.desc");
+      const voteCountMin =
+        discoverFilters.minVoteCount ??
+        (isRegionalFilter
+          ? 15
+          : discoverFilters.companyIds.length > 0
+          ? 30
+          : discoverFilters.keywordGroups.length > 0
+          ? 25
+          : usedFallbackGenres
+          ? 300
+          : hasProviders
+          ? 25
+          : 100);
+      const voteCountMaxParam = discoverFilters.maxVoteCount
+        ? `&vote_count.lte=${discoverFilters.maxVoteCount}`
+        : "";
+      const minVoteAvg =
+        discoverFilters.minVoteAverage ??
+        (usedFallbackGenres ? 6.8 : undefined);
+      const voteAvgParam = minVoteAvg ? `&vote_average.gte=${minVoteAvg}` : "";
 
       // Query across multiple pages if needed so we never run out of fresh titles
-      const maxPagesToFetch = 3;
-      for (let p = initialPage; p < initialPage + maxPagesToFetch; p++) {
-        if (discovered.length >= limit * 2) break;
+      const maxPagesToFetch = discoverFilters.tvShortSeries
+        ? 3
+        : needsSeriesDetails
+        ? 3
+        : 2;
 
-        const url = `/discover/${mediaType}?language=sv-SE&sort_by=popularity.desc&vote_count.gte=${voteCountMin}&page=${p}${watchParam}${genreParam}${withoutGenreParam}${yearParam}`;
+      // For "1–2 säsonger", query BOTH Miniseries (with_type=2, always 1 season) AND Ended modern series (with_status=3 & first_air_date >= 2015)
+      const extraVariantParams: string[] =
+        mediaType === "tv" && discoverFilters.tvShortSeries
+          ? [
+              extraTypeParam.replace(/&with_type=[^&]*/g, "") + "&with_type=2",
+              extraTypeParam.replace(/&with_type=[^&]*/g, "") +
+                "&with_status=3&first_air_date.gte=2015-01-01",
+            ]
+          : [extraTypeParam];
+
+      for (const variantExtra of extraVariantParams) {
+      for (let p = initialPage; p < initialPage + maxPagesToFetch; p++) {
+        if (discovered.length >= (discoverFilters.tvShortSeries ? 50 : limit * 2)) break;
+
+        const baseUrl = `/discover/${mediaType}?language=sv-SE&include_adult=false&sort_by=${sortBy}&vote_count.gte=${voteCountMin}${voteCountMaxParam}${voteAvgParam}&page=${p}${watchParam}${withoutGenreParam}${withoutKeywordParam}${yearParam}${originCountryParam}${originalLangParam}${companyParam}${variantExtra}`;
+        let url = `${baseUrl}${genreParam}${keywordParam}`;
 
         let data: { results?: Array<Record<string, unknown>> } | null = null;
         try {
@@ -293,7 +614,63 @@ async function discoverTmdbCandidates(
           continue;
         }
 
-        // If strict combination yielded 0 hits and we had 3+ rules, relax to the first 2 rules
+        // Fallback 0: if multiple AND-joined keywords yielded < 5 hits, step down softly to OR-joined keywords BEFORE dropping keywords!
+        if (
+          (!data?.results || data.results.length < 5) &&
+          softOrKeywordParam
+        ) {
+          const softUrl = `${baseUrl}${genreParam}${softOrKeywordParam}`;
+          try {
+            const softData = (await fetchFromTmdbApi(softUrl, tmdbKey)) as {
+              results?: Array<Record<string, unknown>>;
+            };
+            if (softData?.results && softData.results.length > (data?.results?.length || 0)) {
+              const existing = data?.results || [];
+              const existingIds = new Set(existing.map((r) => r.id));
+              data = {
+                results: [
+                  ...existing,
+                  ...softData.results.filter((r) => !existingIds.has(r.id)),
+                ],
+              };
+            }
+          } catch {
+            // Keep existing
+          }
+        }
+
+        // Fallback 1: if keyword filter still yielded 0 hits, relax keyword filter while keeping genres
+        if (
+          (!data?.results || data.results.length === 0) &&
+          keywordParam
+        ) {
+          const relaxedUrl = `${baseUrl}${genreParam}`;
+          try {
+            data = (await fetchFromTmdbApi(relaxedUrl, tmdbKey)) as {
+              results?: Array<Record<string, unknown>>;
+            };
+          } catch {
+            // Keep empty
+          }
+        }
+
+        // Fallback 2: if TV with_type=2 (Miniseries) yielded 0 hits, retry without with_type=2
+        if (
+          (!data?.results || data.results.length === 0) &&
+          mediaType === "tv" &&
+          discoverFilters.tvMiniseriesOnly
+        ) {
+          const noTypeUrl = url.replace("&with_type=2", "");
+          try {
+            data = (await fetchFromTmdbApi(noTypeUrl, tmdbKey)) as {
+              results?: Array<Record<string, unknown>>;
+            };
+          } catch {
+            // Keep empty
+          }
+        }
+
+        // Fallback 3: if strict combination yielded 0 hits and we had 3+ rules, relax to the first 2 rules
         if (
           (!data?.results || data.results.length === 0) &&
           ruleTokens.length > 2
@@ -302,7 +679,7 @@ async function discoverTmdbCandidates(
             ruleTokens.slice(0, 2).join(",")
           )}`;
           const fallbackVoteCount = hasProviders ? 15 : 40;
-          const fallbackUrl = `/discover/${mediaType}?language=sv-SE&sort_by=popularity.desc&vote_count.gte=${fallbackVoteCount}&page=${p}${watchParam}${relaxedParam}${withoutGenreParam}${yearParam}`;
+          const fallbackUrl = `/discover/${mediaType}?language=sv-SE&include_adult=false&sort_by=${sortBy}&vote_count.gte=${fallbackVoteCount}&page=${p}${watchParam}${relaxedParam}${withoutGenreParam}${withoutKeywordParam}${yearParam}${originCountryParam}${originalLangParam}${variantExtra}`;
           try {
             data = (await fetchFromTmdbApi(fallbackUrl, tmdbKey)) as {
               results?: Array<Record<string, unknown>>;
@@ -314,10 +691,17 @@ async function discoverTmdbCandidates(
 
         const hits = data?.results || [];
         for (const hit of hits) {
+          const dateStr = String(hit.release_date || hit.first_air_date || "");
+          // Strictly skip unreleased future titles or dateless stubs
+          if (!dateStr || dateStr > todayStr) {
+            continue;
+          }
+
           const title = String(hit.title || hit.name || "").trim();
           const originalTitle = String(
             hit.original_title || hit.original_name || title
           ).trim();
+          const originalLanguage = String(hit.original_language || "").trim();
 
           // Strictly skip titles that were already shown/swiped
           const t1 = normalizeMovieTitle(title);
@@ -329,8 +713,7 @@ async function discoverTmdbCandidates(
             continue;
           }
 
-          const dateStr = String(hit.release_date || hit.first_air_date || "");
-          const year = dateStr ? dateStr.slice(0, 4) : "";
+          const year = dateStr.slice(0, 4);
           const rawGenreIds = Array.isArray(hit.genre_ids)
             ? hit.genre_ids
                 .map(Number)
@@ -340,7 +723,7 @@ async function discoverTmdbCandidates(
           const voteAverage =
             typeof hit.vote_average === "number" && hit.vote_average > 0
               ? Math.round(hit.vote_average * 10) / 10
-              : 7.8;
+              : 7.5;
           const posterPath = hit.poster_path
             ? String(hit.poster_path)
             : undefined;
@@ -366,12 +749,13 @@ async function discoverTmdbCandidates(
             id: `tmdb-disc-${hit.id}`,
             title,
             originalTitle,
+            originalLanguage: originalLanguage || undefined,
             year: year || "2023",
             mediaType,
             runtime: mediaType === "tv" ? "TV-serie" : "Film",
             matchPercentage: Math.min(
-              96,
-              Math.max(90, Math.round(86 + (voteAverage || 7.5)))
+              89,
+              Math.max(81, Math.round(79 + (voteAverage || 7.5)))
             ),
             whyYouWillLikeIt: motivation,
             vibeTags: tmdbGenres.slice(0, 3),
@@ -387,11 +771,142 @@ async function discoverTmdbCandidates(
           });
         }
       }
+      }
     }
 
+    // Deduplicate discovered pool by tmdbId, normalized title, AND max 1 per franchise (e.g. max 1 Harry Potter / Toy Story / Vaiana)
+    const seenIds = new Set<number>();
+    const seenTitleNorms = new Set<string>();
+    const seenFranchises = new Set<string>();
+    const franchiseOverflow: typeof discovered = [];
+    const dedupedDiscovered: typeof discovered = [];
+    for (const d of discovered) {
+      if (d.tmdbId && seenIds.has(d.tmdbId)) continue;
+      const tNorm = normalizeMovieTitle(d.title);
+      if (tNorm && seenTitleNorms.has(tNorm)) continue;
+      if (d.tmdbId) seenIds.add(d.tmdbId);
+      if (tNorm) seenTitleNorms.add(tNorm);
+
+      const fKey = getMovieFranchiseKey(d.title, d.originalTitle);
+      if (fKey && seenFranchises.has(fKey)) {
+        franchiseOverflow.push(d);
+        continue;
+      }
+      if (fKey) seenFranchises.add(fKey);
+      dedupedDiscovered.push(d);
+    }
+    // Only append franchise overflow if we don't even have enough unique franchises to fill the list
+    if (dedupedDiscovered.length < limit && franchiseOverflow.length > 0) {
+      dedupedDiscovered.push(...franchiseOverflow);
+    }
+
+    // Enrich top candidates with TMDB details when series-length, movie-runtime, or non-Latin title resolution is needed
+    const inspectLimit = discoverFilters.tvShortSeries ? 40 : Math.max(limit, 18);
+    const toInspect = dedupedDiscovered.slice(0, inspectLimit);
+    const enrichedDiscovered = await Promise.all(
+      toInspect.map(async (item) => {
+        const needsLatinTitle = hasNonLatinScript(item.title);
+        const shouldFetchTv =
+          item.mediaType === "tv" && (needsSeriesDetails || needsLatinTitle);
+        const shouldFetchMovie =
+          item.mediaType === "movie" &&
+          (needsMovieRuntimeDetails || needsLatinTitle);
+
+        if (!shouldFetchTv && !shouldFetchMovie) {
+          return item;
+        }
+
+        let updatedTitle = item.title;
+        if (needsLatinTitle && item.tmdbId) {
+          const enTitle = await fetchTmdbEnglishTitle(
+            item.tmdbId,
+            item.mediaType === "tv" ? "tv" : "movie",
+            tmdbKey
+          );
+          if (enTitle) updatedTitle = enTitle;
+        }
+
+        if (shouldFetchTv && item.tmdbId) {
+          try {
+            const tvDetails = (await fetchFromTmdbApi(
+              `/tv/${item.tmdbId}?language=sv-SE`,
+              tmdbKey
+            )) as {
+              number_of_seasons?: number;
+              seasons?: Array<{ season_number: number }>;
+              status?: string;
+              episode_run_time?: number[];
+              last_episode_to_air?: { runtime?: number };
+            };
+            let seasonCount =
+              typeof tvDetails?.number_of_seasons === "number" &&
+              tvDetails.number_of_seasons > 0
+                ? tvDetails.number_of_seasons
+                : undefined;
+            if (!seasonCount && Array.isArray(tvDetails?.seasons)) {
+              const valid = tvDetails.seasons.filter((s) => s.season_number > 0);
+              if (valid.length > 0) seasonCount = valid.length;
+            }
+            const epList = Array.isArray(tvDetails?.episode_run_time)
+              ? tvDetails.episode_run_time.filter((n) => typeof n === "number" && n > 0)
+              : [];
+            const epRuntime =
+              epList.length > 0
+                ? Math.round(epList.reduce((a, b) => a + b, 0) / epList.length)
+                : typeof tvDetails?.last_episode_to_air?.runtime === "number" &&
+                  tvDetails.last_episode_to_air.runtime > 0
+                ? tvDetails.last_episode_to_air.runtime
+                : undefined;
+            const tvStatus = tvDetails?.status ? String(tvDetails.status) : undefined;
+            const rtParts: string[] = [];
+            if (seasonCount) {
+              rtParts.push(seasonCount === 1 ? "1 säsong" : `${seasonCount} säsonger`);
+            }
+            if (epRuntime) {
+              rtParts.push(`${epRuntime} min/avsnitt`);
+            }
+            return {
+              ...item,
+              title: updatedTitle,
+              seasonCount: seasonCount ?? getSeriesSeasonCount(updatedTitle),
+              episodeRuntimeMinutes: epRuntime,
+              tvStatus,
+              runtime: rtParts.length > 0 ? rtParts.join(" · ") : item.runtime,
+            };
+          } catch {
+            return { ...item, title: updatedTitle };
+          }
+        }
+
+        if (shouldFetchMovie && item.tmdbId) {
+          try {
+            const movieDetails = (await fetchFromTmdbApi(
+              `/movie/${item.tmdbId}?language=sv-SE`,
+              tmdbKey
+            )) as { runtime?: number };
+            const runtimeMinutes =
+              typeof movieDetails?.runtime === "number" && movieDetails.runtime > 0
+                ? movieDetails.runtime
+                : undefined;
+            const formattedRt = formatRuntimeMinutes(runtimeMinutes);
+            return {
+              ...item,
+              title: updatedTitle,
+              runtimeMinutes,
+              runtime: formattedRt || item.runtime,
+            };
+          } catch {
+            return { ...item, title: updatedTitle };
+          }
+        }
+
+        return { ...item, title: updatedTitle };
+      })
+    );
+
     let verifiedDiscovered = filterAndVerifyMoviesByTmdbCategories(
-      discovered,
-      preferences
+      enrichedDiscovered,
+      effectivePreferences
     );
     if (dislikedCategories.length > 0) {
       verifiedDiscovered = filterOutDislikedCategories(
@@ -399,12 +914,17 @@ async function discoverTmdbCandidates(
         dislikedCategories
       );
     }
-    // Final check against previous titles
+    // Final check against previous titles and drop any remaining untranslated non-Latin titles if enough Latin titles exist
     verifiedDiscovered = verifiedDiscovered.filter((m) => {
       const t1 = normalizeMovieTitle(m.title);
       const t2 = m.originalTitle ? normalizeMovieTitle(m.originalTitle) : "";
       return !previousNorms.has(t1) && (!t2 || !previousNorms.has(t2));
     });
+
+    const latinOnly = verifiedDiscovered.filter((m) => !hasNonLatinScript(m.title));
+    if (latinOnly.length >= Math.min(5, limit)) {
+      verifiedDiscovered = latinOnly;
+    }
 
     return verifiedDiscovered.slice(0, limit);
   } catch {
@@ -486,21 +1006,41 @@ async function enrichSingleMovieWithTmdb(
       : curated.posterPath;
 
     let swedishProviders = curated.swedishProviders;
-    try {
-      const providersData = (await fetchFromTmdbApi(
-        `/${resolvedType}/${tmdbId}/watch/providers`,
-        tmdbKey
-      )) as { results?: Record<string, unknown> };
+    let ageRating = curated.ageRating;
+    let runtimeMinutes = curated.runtimeMinutes;
+    let episodeRuntimeMinutes = curated.episodeRuntimeMinutes;
+    let tvStatus = curated.tvStatus;
+    let seasonCount = curated.seasonCount;
+    const originalLanguage =
+      typeof topHit.original_language === "string" && topHit.original_language
+        ? topHit.original_language
+        : curated.originalLanguage;
+
+    const [providersRes, ageRes, detailsRes] = await Promise.allSettled([
+      fetchFromTmdbApi(`/${resolvedType}/${tmdbId}/watch/providers`, tmdbKey),
+      fetchTmdbAgeRating(tmdbId, resolvedType, tmdbKey),
+      fetchFromTmdbApi(`/${resolvedType}/${tmdbId}?language=sv-SE`, tmdbKey),
+    ]);
+    if (providersRes.status === "fulfilled") {
+      const providersData = providersRes.value as {
+        results?: Record<string, unknown>;
+      };
       const seObj = providersData?.results?.SE;
       swedishProviders = parseTmdbSwedishProviders(seObj);
-    } catch {
-      // Keep curated Swedish providers if watch/providers fails
+    }
+    if (ageRes.status === "fulfilled" && ageRes.value) {
+      ageRating = ageRes.value;
     }
 
-    const hitTitle = String(topHit.title || topHit.name || title);
+    let hitTitle = String(topHit.title || topHit.name || title);
     const hitOriginal = String(
       topHit.original_title || topHit.original_name || hitTitle
     );
+    if (hasNonLatinScript(hitTitle)) {
+      const enTitle = await fetchTmdbEnglishTitle(tmdbId, resolvedType, tmdbKey);
+      if (enTitle) hitTitle = enTitle;
+    }
+
     const rawGenreIds = Array.isArray(topHit.genre_ids)
       ? topHit.genre_ids.map(Number).filter((n) => !Number.isNaN(n) && n > 0)
       : [];
@@ -511,22 +1051,51 @@ async function enrichSingleMovieWithTmdb(
         ? mapTmdbGenreIdsToNames(tmdbGenreIds)
         : curated.tmdbGenres;
 
-    let seasonCount = curated.seasonCount;
     if (resolvedType === "tv") {
       seasonCount = getSeriesSeasonCount(hitTitle);
-      try {
-        const tvDetails = (await fetchFromTmdbApi(
-          `/tv/${tmdbId}?language=sv-SE`,
-          tmdbKey
-        )) as { number_of_seasons?: number };
+      if (detailsRes.status === "fulfilled" && detailsRes.value) {
+        const tvDetails = detailsRes.value as {
+          number_of_seasons?: number;
+          seasons?: Array<{ season_number: number }>;
+          status?: string;
+          episode_run_time?: number[];
+          last_episode_to_air?: { runtime?: number };
+        };
         if (
           typeof tvDetails?.number_of_seasons === "number" &&
           tvDetails.number_of_seasons > 0
         ) {
           seasonCount = tvDetails.number_of_seasons;
+        } else if (Array.isArray(tvDetails?.seasons)) {
+          const valid = tvDetails.seasons.filter((s) => s.season_number > 0);
+          if (valid.length > 0) seasonCount = valid.length;
         }
-      } catch {
-        // Keep seasonCount from getSeriesSeasonCount
+        if (tvDetails?.status) {
+          tvStatus = String(tvDetails.status);
+        }
+        const epList = Array.isArray(tvDetails?.episode_run_time)
+          ? tvDetails.episode_run_time.filter(
+              (n) => typeof n === "number" && n > 0
+            )
+          : [];
+        if (epList.length > 0) {
+          episodeRuntimeMinutes = Math.round(
+            epList.reduce((a, b) => a + b, 0) / epList.length
+          );
+        } else if (
+          typeof tvDetails?.last_episode_to_air?.runtime === "number" &&
+          tvDetails.last_episode_to_air.runtime > 0
+        ) {
+          episodeRuntimeMinutes = tvDetails.last_episode_to_air.runtime;
+        }
+      }
+    } else if (detailsRes.status === "fulfilled" && detailsRes.value) {
+      const movieDetails = detailsRes.value as { runtime?: number };
+      if (
+        typeof movieDetails?.runtime === "number" &&
+        movieDetails.runtime > 0
+      ) {
+        runtimeMinutes = movieDetails.runtime;
       }
     }
 
@@ -542,6 +1111,11 @@ async function enrichSingleMovieWithTmdb(
       tmdbGenreIds,
       tmdbGenres,
       seasonCount,
+      runtimeMinutes,
+      episodeRuntimeMinutes,
+      tvStatus,
+      originalLanguage,
+      ageRating: ageRating || inferAgeRatingFromGenres(tmdbGenreIds),
     };
     if (tmdbEnrichCache.size > 500) {
       const oldestKey = tmdbEnrichCache.keys().next().value;
@@ -600,6 +1174,11 @@ async function startServer() {
                   hit.original_title || hit.original_name || hitTitle
                 );
                 const curated = lookupCuratedTmdbMovie(hitTitle);
+                const rawGenreIds = Array.isArray(hit.genre_ids)
+                  ? hit.genre_ids
+                      .map(Number)
+                      .filter((n) => !Number.isNaN(n) && n > 0)
+                  : [];
                 return {
                   tmdbId: Number(hit.id),
                   title: hitTitle,
@@ -614,6 +1193,9 @@ async function startServer() {
                       ? Math.round(hit.vote_average * 10) / 10
                       : curated.voteAverage,
                   swedishProviders: curated.swedishProviders,
+                  tmdbGenreIds: rawGenreIds.length > 0 ? rawGenreIds : curated.tmdbGenreIds,
+                  ageRating:
+                    curated.ageRating || inferAgeRatingFromGenres(rawGenreIds),
                   seasonCount: isTv
                     ? curated.seasonCount || getSeriesSeasonCount(hitTitle)
                     : undefined,
@@ -748,18 +1330,142 @@ async function startServer() {
         : [];
       const candidateTargetCount =
         selectedServices.length > 0
-          ? Math.max(12, requestedLimit + 4)
-          : Math.max(10, requestedLimit + 2);
+          ? Math.max(12, requestedLimit + 5)
+          : Math.max(10, requestedLimit + 5);
+
+      const effectiveMediaType = resolveEffectiveMediaType(preferences);
+      const effectivePreferences: EveningPreferences = {
+        ...preferences,
+        mediaType: effectiveMediaType,
+      };
+
+      const hasSteering = Boolean(effectivePreferences.steering?.anchorMovie?.title);
+      const effectivePreviousTitles = [
+        ...(previousTitles || []),
+        ...(hasSteering && effectivePreferences.steering?.anchorMovie?.title
+          ? [
+              effectivePreferences.steering.anchorMovie.title,
+              ...(effectivePreferences.steering.anchorMovie.originalTitle
+                ? [effectivePreferences.steering.anchorMovie.originalTitle]
+                : []),
+            ]
+          : []),
+      ];
+      const verificationPreferences: EveningPreferences = hasSteering
+        ? {
+            ...effectivePreferences,
+            genres: [],
+            contents: [],
+            frameworks: [],
+            moods: [],
+          }
+        : effectivePreferences;
+
+      // Helper to merge TMDB enrichment cleanly into a recommendation object
+      const enrichRec = async (
+        rec: MovieRecommendation
+      ): Promise<MovieRecommendation> => {
+        const needsDetails =
+          (rec.mediaType === "tv" && rec.seasonCount === undefined) ||
+          (rec.mediaType === "movie" &&
+            rec.runtimeMinutes === undefined &&
+            hasMovieLengthFilter(verificationPreferences));
+        if (
+          !needsDetails &&
+          rec.tmdbId &&
+          rec.posterPath &&
+          rec.swedishProviders &&
+          rec.swedishProviders.type !== "none" &&
+          rec.swedishProviders.providers.length > 0
+        ) {
+          return rec;
+        }
+        const meta = await enrichSingleMovieWithTmdb(
+          rec.originalTitle || rec.title,
+          rec.year,
+          tmdbKey,
+          rec.mediaType
+        );
+        const finalPoster = meta.posterPath || rec.posterPath;
+        const finalRating = meta.voteAverage || rec.tmdbRating;
+        const finalProviders =
+          meta.swedishProviders && meta.swedishProviders.providers.length > 0
+            ? meta.swedishProviders
+            : rec.swedishProviders && rec.swedishProviders.providers.length > 0
+            ? rec.swedishProviders
+            : meta.swedishProviders || rec.swedishProviders;
+        const finalMediaType =
+          effectiveMediaType === "tv"
+            ? "tv"
+            : effectiveMediaType === "movie"
+            ? "movie"
+            : rec.mediaType || meta.mediaType || "movie";
+        const finalSeasonCount =
+          finalMediaType === "tv"
+            ? meta.seasonCount ?? rec.seasonCount
+            : undefined;
+        const finalRuntimeMinutes = meta.runtimeMinutes ?? rec.runtimeMinutes;
+        const finalEpRuntime =
+          meta.episodeRuntimeMinutes ?? rec.episodeRuntimeMinutes;
+        const finalTvStatus = meta.tvStatus ?? rec.tvStatus;
+
+        let finalRuntime = rec.runtime;
+        if (
+          finalMediaType === "movie" &&
+          finalRuntimeMinutes &&
+          (!finalRuntime || finalRuntime === "Film")
+        ) {
+          finalRuntime =
+            formatRuntimeMinutes(finalRuntimeMinutes) || finalRuntime;
+        } else if (
+          finalMediaType === "tv" &&
+          finalSeasonCount &&
+          (!finalRuntime || finalRuntime === "TV-serie")
+        ) {
+          finalRuntime =
+            finalSeasonCount === 1
+              ? "1 säsong"
+              : `${finalSeasonCount} säsonger`;
+          if (finalEpRuntime) {
+            finalRuntime += ` · ${finalEpRuntime} min/avsnitt`;
+          }
+        }
+
+        const finalTitle =
+          hasNonLatinScript(rec.title) && meta.title && !hasNonLatinScript(meta.title)
+            ? meta.title
+            : rec.title;
+
+        return {
+          ...rec,
+          title: finalTitle,
+          year: meta.year || rec.year,
+          runtime: finalRuntime,
+          runtimeMinutes: finalRuntimeMinutes,
+          mediaType: finalMediaType,
+          seasonCount: finalSeasonCount,
+          episodeRuntimeMinutes: finalEpRuntime,
+          tvStatus: finalTvStatus,
+          originalLanguage: meta.originalLanguage || rec.originalLanguage,
+          tmdbId: meta.tmdbId || rec.tmdbId,
+          posterPath: finalPoster,
+          tmdbRating: finalRating,
+          swedishProviders: finalProviders,
+          tmdbGenreIds: meta.tmdbGenreIds || rec.tmdbGenreIds,
+          tmdbGenres: meta.tmdbGenres || rec.tmdbGenres,
+          ageRating: meta.ageRating || rec.ageRating,
+        };
+      };
 
       let discoveredPool: MovieRecommendation[] = [];
       if (tmdbKey) {
         discoveredPool = await discoverTmdbCandidates(
-          preferences,
+          verificationPreferences,
           selectedServices,
           tmdbKey,
           20,
           dislikedCategories,
-          previousTitles,
+          effectivePreviousTitles,
           requestPage,
           watchedMovies
         );
@@ -770,8 +1476,8 @@ async function startServer() {
           watchedMovies,
           watchlist,
           tasteProfileSummary,
-          preferences,
-          previousTitles,
+          effectivePreferences,
+          effectivePreviousTitles,
           dislikedCategories
         );
 
@@ -784,25 +1490,52 @@ async function startServer() {
             : "";
 
         const isTasteProfileOnly =
-          (preferences.moods || []).length === 0 &&
-          (preferences.genres || []).length === 0 &&
-          (preferences.contents || []).length === 0 &&
-          !preferences.customText;
+          !hasSteering &&
+          (effectivePreferences.moods || []).length === 0 &&
+          (effectivePreferences.genres || []).length === 0 &&
+          (effectivePreferences.contents || []).length === 0 &&
+          (effectivePreferences.frameworks || []).length === 0 &&
+          !effectivePreferences.customText;
 
         const chosenCategoriesList = [
-          ...(preferences.genres || []),
-          ...(preferences.contents || []),
-          ...(preferences.moods || []),
-          ...(preferences.frameworks || []),
+          ...formatSelectedChipsWithContext(effectivePreferences.genres, GENRE_GROUPS),
+          ...formatSelectedChipsWithContext(effectivePreferences.contents, CONTENT_GROUPS),
+          ...formatSelectedChipsWithContext(effectivePreferences.moods, MOOD_GROUPS),
+          ...formatSelectedChipsWithContext(
+            effectivePreferences.frameworks,
+            SETTING_GROUPS
+          ),
         ];
 
+        const steeringPromptLines = buildSteeringPromptLines(
+          effectivePreferences.steering
+        );
+        const steeringUserPrompt =
+          hasSteering && effectivePreferences.steering?.anchorMovie
+            ? `STYRNING FRÅN VALD FILM (HÖGSTA PRIORITET): Användaren valde "${
+                effectivePreferences.steering.anchorMovie.title
+              }" som riktning och vill söka vidare därifrån.${
+                steeringPromptLines.length > 0
+                  ? ` FÖLJ SAMTLIGA DESSA KRAV FÖR ALLA ${candidateTargetCount} FÖRSLAG: ${steeringPromptLines.join(
+                      " | "
+                    )}`
+                  : " Behåll liknande känsla och kvalitet."
+              } Alla ${candidateTargetCount} förslag MÅSTE kännas som en naturlig vidareutveckling från "${
+                effectivePreferences.steering.anchorMovie.title
+              }" i exakt denna riktning, och i "whyYouWillLikeIt" ska du tydligt förklara kopplingen till "${
+                effectivePreferences.steering.anchorMovie.title
+              }"!`
+            : "";
+
         const userPrompt = `Ta fram ${candidateTargetCount} skräddarsydda rekommendationer för användaren. ${
-          isTasteProfileOnly
+          hasSteering
+            ? steeringUserPrompt
+            : isTasteProfileOnly
             ? `HÅRT FOKUS PÅ PERSONLIG SMAKPROFIL: Rekommendera titlar uteslutande baserat på användarens unika smakprofil, högt betygsatta favoriter och undvik det hen ogillar.
 VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest förutsägbara mainstream-klassikerna (som The Dark Knight, Inception, Interstellar, Gladiator, Fight Club eller Pulp Fiction) som nästan alla filmintresserade redan har sett. Gräv djupare! Ge användaren en inspirerande, varierad och personlig mix av högklassiga filmer och serier – både hyllade mästerverk, moderna pärlor och dolda guldkorn – som fångar exakt den regi, ton, atmosfär, nerv och tematik som användaren älskar i sina 4- och 5-stjärniga betyg!`
             : `Alla ${candidateTargetCount} titlar MÅSTE 100% matcha användarens valda kategorier, genrer, innehåll och stämning under KVÄLLENS VAL.`
         }${
-          chosenCategoriesList.length > 1
+          !hasSteering && chosenCategoriesList.length > 1
             ? ` SAMLAD BEDÖMNING AV FLERA KATEGORIER (STRIKT OCH-LOGIK): Användaren har valt flera kategorier samtidigt: [${chosenCategoriesList.join(
                 ", "
               )}]. SAMTLIGA titlar MÅSTE förena ALLA dessa kategorier samtidigt! Föreslå ALDRIG en titel som bara matchar en av kategorierna (om användaren t.ex. valt både Animerat och Action får du ALDRIG föreslå filmer som Trolls eller Sing som saknar action, och ALDRIG spelfilmer utan animation).`
@@ -830,37 +1563,14 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
         } Om användarens val tydligt pekar på en specifik titel (även om den redan är sedd), sätt den som #1 med isExactPinpointMatch: true. Annars ska du aldrig föreslå titlar som redan finns i sedda eller i watchlist. Svara ENDAST med en giltig JSON-array med ${candidateTargetCount} objekt.`;
 
         try {
-          let response;
-          const modelsToTry: Array<{ name: string; disableThinking: boolean }> = [
-            { name: "gemini-2.5-flash", disableThinking: true },
-            { name: "gemini-2.0-flash", disableThinking: true },
-            { name: "gemini-1.5-flash", disableThinking: false },
-            { name: "gemini-2.5-pro", disableThinking: false },
-            { name: "gemini-3-flash-preview", disableThinking: true },
-            { name: "gemini-3.1-flash-lite-preview", disableThinking: true },
-          ];
-          for (const modelSpec of modelsToTry) {
-            try {
-              response = await ai.models.generateContent({
-                model: modelSpec.name,
-                contents: userPrompt,
-                config: {
-                  systemInstruction,
-                  responseMimeType: "application/json",
-                  ...(modelSpec.disableThinking
-                    ? { thinkingConfig: { thinkingBudget: 0 } }
-                    : {}),
-                  temperature: 0.85,
-                  abortSignal: AbortSignal.timeout(10000),
-                },
-              });
-              if (response?.text) break;
-            } catch {
-              // Try next model
-            }
-          }
+          const rawText = await callGeminiWithFallback(ai, {
+            contents: userPrompt,
+            systemInstruction,
+            temperature: 0.85,
+            responseMimeType: "application/json",
+            label: "recommendations",
+          });
 
-          const rawText = response?.text?.trim();
           if (rawText) {
             const cleanedText = rawText
               .replace(/^```json\s*/i, "")
@@ -879,9 +1589,9 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
                 const rt = String(item.runtime || "2 tim");
                 const rawMedia = String(item.mediaType || "").toLowerCase();
                 const inferredType: "movie" | "tv" =
-                  preferences.mediaType === "tv"
+                  effectiveMediaType === "tv"
                     ? "tv"
-                    : preferences.mediaType === "movie"
+                    : effectiveMediaType === "movie"
                     ? "movie"
                     : rawMedia === "tv" ||
                       rawMedia === "series" ||
@@ -900,9 +1610,12 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
                   year: String(item.year || "2020"),
                   runtime: rt,
                   mediaType: inferredType,
+                  ageRating: normalizeSwedishAgeRating(
+                    typeof item.ageRating === "string" ? item.ageRating : undefined
+                  ),
                   matchPercentage: Math.min(
                     99,
-                    Math.max(80, Number(item.matchPercentage) || 92)
+                    Math.max(85, Number(item.matchPercentage) || 93)
                   ),
                   whyYouWillLikeIt: String(
                     item.whyYouWillLikeIt ||
@@ -920,95 +1633,33 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
               });
             }
           }
-        } catch {
-          // Graceful fallback to smart local curator below
+        } catch (parseErr) {
+          console.warn(
+            "[Gemini:recommendations] Failed to parse JSON response:",
+            parseErr instanceof Error ? parseErr.message : String(parseErr)
+          );
         }
       }
 
-      // Deduplicate against watchedMovies, watchlist, and previously shown titles
-      let uniqueRecs = filterDuplicateRecommendations(
+      // Deduplicate AI recommendations FIRST without mixing generic discoveredPool into them
+      let uniqueAiRecs = filterDuplicateRecommendations(
         recommendations,
         watchedMovies,
         watchlist,
-        previousTitles
+        effectivePreviousTitles
+      ).slice(0, candidateTargetCount);
+
+      // Enrich AI candidates with TMDB metadata (including seasonCount, runtimeMinutes, tvStatus)
+      const enrichedAiCandidates = await Promise.all(
+        uniqueAiRecs.map((rec) => enrichRec(rec))
       );
 
-      // Ensure we have candidates, topping up from discovered pool if available
-      if (uniqueRecs.length < candidateTargetCount && discoveredPool.length > 0) {
-        const existingTitles = new Set([
-          ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
-          ...watchlist.map((m) => normalizeMovieTitle(m.title)),
-          ...uniqueRecs.map((m) => normalizeMovieTitle(m.title)),
-          ...(previousTitles || []).map((t) => normalizeMovieTitle(t)),
-        ]);
-        for (const disc of discoveredPool) {
-          const t1 = normalizeMovieTitle(disc.title);
-          const t2 = normalizeMovieTitle(disc.originalTitle);
-          if (!existingTitles.has(t1) && !existingTitles.has(t2)) {
-            uniqueRecs.push(disc);
-            existingTitles.add(t1);
-            if (uniqueRecs.length >= candidateTargetCount) break;
-          }
-        }
-      }
-
-      if (uniqueRecs.length < 5) {
-        const fallbacks = generateSmartFallbackRecommendations(
-          watchedMovies,
-          [...watchlist, ...uniqueRecs],
-          preferences,
-          dislikedCategories,
-          previousTitles
-        );
-        uniqueRecs = [...uniqueRecs, ...fallbacks].slice(0, candidateTargetCount);
-      } else {
-        uniqueRecs = uniqueRecs.slice(0, candidateTargetCount);
-      }
-
-      // Enrich candidate recommendations with TMDB poster, rating, official TMDB categories, and Swedish streaming providers
-      const enrichedCandidates = await Promise.all(
-        uniqueRecs.map(async (rec) => {
-          if (
-            rec.tmdbId &&
-            rec.posterPath &&
-            rec.swedishProviders &&
-            rec.swedishProviders.type !== "none" &&
-            rec.swedishProviders.providers.length > 0
-          ) {
-            return rec;
-          }
-          const meta = await enrichSingleMovieWithTmdb(
-            rec.originalTitle || rec.title,
-            rec.year,
-            tmdbKey,
-            rec.mediaType
-          );
-          const finalPoster = meta.posterPath || rec.posterPath;
-          const finalRating = meta.voteAverage || rec.tmdbRating;
-          const finalProviders =
-            meta.swedishProviders && meta.swedishProviders.providers.length > 0
-              ? meta.swedishProviders
-              : rec.swedishProviders && rec.swedishProviders.providers.length > 0
-              ? rec.swedishProviders
-              : meta.swedishProviders || rec.swedishProviders;
-
-          return {
-            ...rec,
-            year: meta.year || rec.year,
-            mediaType: rec.mediaType || meta.mediaType || "movie",
-            tmdbId: meta.tmdbId || rec.tmdbId,
-            posterPath: finalPoster,
-            tmdbRating: finalRating,
-            swedishProviders: finalProviders,
-            tmdbGenreIds: meta.tmdbGenreIds || rec.tmdbGenreIds,
-            tmdbGenres: meta.tmdbGenres || rec.tmdbGenres,
-          };
-        })
-      );
-
-      // Step 1: Double-check all candidates against official TMDB categories & release year
+      // Step 1: Verify AI candidates against official TMDB categories, release year, runtime & seasonCount
       let verifiedCandidates: MovieRecommendation[] =
-        filterAndVerifyMoviesByTmdbCategories(enrichedCandidates, preferences);
+        filterAndVerifyMoviesByTmdbCategories(
+          enrichedAiCandidates,
+          verificationPreferences
+        );
 
       // Step 1.5: Strictly filter out any candidates that match user's disliked categories
       if (dislikedCategories.length > 0) {
@@ -1026,15 +1677,15 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
         );
       }
 
-      // Step 3: If fewer than requestedLimit candidates survived, top up with 100% verified titles
+      // Step 3: ONLY if fewer than requestedLimit AI candidates survived, top up with 100% verified titles
       if (verifiedCandidates.length < requestedLimit) {
-        // Priority 3A: Top up from TMDB Discovered pool (guaranteed on selected services in SE & verified categories)
+        // Priority 3A: Top up from TMDB Discovered pool (strictly verified against all rules)
         if (discoveredPool.length > 0) {
           const existingTitles = new Set([
             ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
             ...watchlist.map((m) => normalizeMovieTitle(m.title)),
             ...verifiedCandidates.map((m) => normalizeMovieTitle(m.title)),
-            ...(previousTitles || []).map((t) => normalizeMovieTitle(t)),
+            ...(effectivePreviousTitles || []).map((t) => normalizeMovieTitle(t)),
           ]);
           const unusedDiscovered = discoveredPool.filter((d) => {
             const t1 = normalizeMovieTitle(d.title);
@@ -1043,7 +1694,7 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
           });
           let verifiedDiscovered = filterAndVerifyMoviesByTmdbCategories(
             unusedDiscovered,
-            preferences
+            verificationPreferences
           );
           if (dislikedCategories.length > 0) {
             verifiedDiscovered = filterOutDislikedCategories(
@@ -1058,21 +1709,63 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
           }
         }
 
-        // Priority 3B: If still fewer than requestedLimit, do a broader discover keeping genres
+        // Priority 3B: If still fewer than requestedLimit, do a broader discover preserving hard length & era rules
         if (verifiedCandidates.length < requestedLimit && tmdbKey) {
           try {
+            const preservedMoods = (effectivePreferences.moods || []).filter((m) =>
+              [
+                "Max 90 min",
+                "Max 90 minuter",
+                "Max 2 tim",
+                "Max 2 timmar",
+                "Över 2 tim",
+                "2+ timmar (Långfilm)",
+                "Miniserie",
+                "1–2 säsonger",
+                "3–5 säsonger",
+                "6+ säsonger",
+                "Korta avsnitt",
+                "Avslutad serie",
+                "Serielängd",
+              ].includes(m)
+            );
+            const preservedFrameworks = (effectivePreferences.frameworks || []).filter(
+              (f) =>
+                [
+                  "2020-talet",
+                  "2010-talet",
+                  "2000-talet",
+                  "1990-talet",
+                  "1980-talet",
+                  "Före 1980",
+                  "Nyare än 2015",
+                  "Klassiker",
+                  "Sverige",
+                  "Norden",
+                  "Sverige & Norden",
+                  "Europa",
+                  "Stockholm",
+                  "London",
+                  "Tokyo",
+                ].includes(f)
+            );
+            const broaderPrefs: EveningPreferences = {
+              ...effectivePreferences,
+              moods: preservedMoods,
+              frameworks: preservedFrameworks,
+            };
             const broaderPool = await discoverTmdbCandidates(
-              { ...preferences, moods: [], frameworks: [] },
+              broaderPrefs,
               selectedServices,
               tmdbKey,
               20,
               dislikedCategories,
-              previousTitles,
+              effectivePreviousTitles,
               requestPage + 1
             );
             let verifiedBroader = filterAndVerifyMoviesByTmdbCategories(
               broaderPool,
-              preferences
+              broaderPrefs
             );
             if (dislikedCategories.length > 0) {
               verifiedBroader = filterOutDislikedCategories(
@@ -1084,7 +1777,7 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
               ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
               ...watchlist.map((m) => normalizeMovieTitle(m.title)),
               ...verifiedCandidates.map((m) => normalizeMovieTitle(m.title)),
-              ...(previousTitles || []).map((t) => normalizeMovieTitle(t)),
+              ...(effectivePreviousTitles || []).map((t) => normalizeMovieTitle(t)),
             ]);
             for (const cand of verifiedBroader) {
               const t1 = normalizeMovieTitle(cand.title);
@@ -1105,51 +1798,18 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
           const extraFallbacks = generateSmartFallbackRecommendations(
             watchedMovies,
             [...watchlist, ...verifiedCandidates],
-            preferences,
+            effectivePreferences,
             dislikedCategories,
-            previousTitles
+            effectivePreviousTitles
           );
           const enrichedExtra = await Promise.all(
-            extraFallbacks.map(async (rec) => {
-              if (
-                rec.tmdbId &&
-                rec.posterPath &&
-                rec.swedishProviders &&
-                rec.swedishProviders.type !== "none" &&
-                rec.swedishProviders.providers.length > 0
-              ) {
-                return rec;
-              }
-              const meta = await enrichSingleMovieWithTmdb(
-                rec.originalTitle || rec.title,
-                rec.year,
-                tmdbKey,
-                rec.mediaType
-              );
-              const finalPoster = meta.posterPath || rec.posterPath;
-              const finalRating = meta.voteAverage || rec.tmdbRating;
-              const finalProviders =
-                meta.swedishProviders && meta.swedishProviders.providers.length > 0
-                  ? meta.swedishProviders
-                  : rec.swedishProviders && rec.swedishProviders.providers.length > 0
-                  ? rec.swedishProviders
-                  : meta.swedishProviders || rec.swedishProviders;
-
-              return {
-                ...rec,
-                year: meta.year || rec.year,
-                mediaType: rec.mediaType || meta.mediaType || "movie",
-                tmdbId: meta.tmdbId || rec.tmdbId,
-                posterPath: finalPoster,
-                tmdbRating: finalRating,
-                swedishProviders: finalProviders,
-                tmdbGenreIds: meta.tmdbGenreIds || rec.tmdbGenreIds,
-                tmdbGenres: meta.tmdbGenres || rec.tmdbGenres,
-              };
-            })
+            extraFallbacks.map((rec) => enrichRec(rec))
           );
           let verifiedExtra: MovieRecommendation[] =
-            filterAndVerifyMoviesByTmdbCategories(enrichedExtra, preferences);
+            filterAndVerifyMoviesByTmdbCategories(
+              enrichedExtra,
+              verificationPreferences
+            );
           if (dislikedCategories.length > 0) {
             verifiedExtra = filterOutDislikedCategories(
               verifiedExtra,
@@ -1166,7 +1826,7 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
             [...verifiedCandidates, ...verifiedExtra],
             watchedMovies,
             watchlist,
-            previousTitles
+            effectivePreviousTitles
           );
         }
       }
@@ -1176,9 +1836,9 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
         verifiedCandidates = generateSmartFallbackRecommendations(
           watchedMovies,
           watchlist,
-          preferences,
+          effectivePreferences,
           dislikedCategories,
-          previousTitles
+          effectivePreviousTitles
         );
       }
 
@@ -1189,17 +1849,152 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
         );
       }
 
-      // Strict guarantee: never re-serve a movie present in previousTitles
+      // Strict guarantee: never re-serve a movie present in previousTitles (or anchor movie), deduplicate by normalized title, AND enforce max 1 movie per franchise
       const previousNorms = new Set(
-        (previousTitles || []).map((t) => normalizeMovieTitle(t)).filter(Boolean)
+        (effectivePreviousTitles || [])
+          .map((t) => normalizeMovieTitle(t))
+          .filter(Boolean)
       );
-      verifiedCandidates = verifiedCandidates.filter((m) => {
-        const t1 = normalizeMovieTitle(m.title);
-        const t2 = m.originalTitle ? normalizeMovieTitle(m.originalTitle) : "";
-        return !previousNorms.has(t1) && (!t2 || !previousNorms.has(t2));
-      });
+      const dedupeVerified = (list: MovieRecommendation[], enforceFranchise = true) => {
+        const seen = new Set<string>();
+        const seenFranchises = new Set<string>();
+        return list.filter((m) => {
+          const t1 = normalizeMovieTitle(m.title);
+          const t2 = m.originalTitle ? normalizeMovieTitle(m.originalTitle) : "";
+          if (previousNorms.has(t1) || (t2 && previousNorms.has(t2))) return false;
+          if (t1 && seen.has(t1)) return false;
+          if (enforceFranchise && !m.isExactPinpointMatch) {
+            const fKey = getMovieFranchiseKey(m.title, m.originalTitle);
+            if (fKey && seenFranchises.has(fKey)) return false;
+            if (fKey) seenFranchises.add(fKey);
+          }
+          if (t1) seen.add(t1);
+          return true;
+        });
+      };
+      verifiedCandidates = dedupeVerified(verifiedCandidates, true);
 
-      const finalRecs = verifiedCandidates.slice(0, requestedLimit);
+      // If deduplication reduced count below requestedLimit, top up from remaining discoveredPool or fallbacks
+      if (verifiedCandidates.length < requestedLimit) {
+        const existingNorms = new Set([
+          ...previousNorms,
+          ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
+          ...watchlist.map((m) => normalizeMovieTitle(m.title)),
+          ...verifiedCandidates.map((m) => normalizeMovieTitle(m.title)),
+        ]);
+        const existingFranchises = new Set(
+          verifiedCandidates
+            .map((m) => getMovieFranchiseKey(m.title, m.originalTitle))
+            .filter(Boolean)
+        );
+        for (const d of discoveredPool) {
+          if (verifiedCandidates.length >= requestedLimit) break;
+          const t1 = normalizeMovieTitle(d.title);
+          const t2 = d.originalTitle ? normalizeMovieTitle(d.originalTitle) : "";
+          const fKey = getMovieFranchiseKey(d.title, d.originalTitle);
+          if (
+            !existingNorms.has(t1) &&
+            (!t2 || !existingNorms.has(t2)) &&
+            (!fKey || !existingFranchises.has(fKey))
+          ) {
+            verifiedCandidates.push(d);
+            existingNorms.add(t1);
+            if (fKey) existingFranchises.add(fKey);
+          }
+        }
+        if (verifiedCandidates.length < requestedLimit) {
+          const lastResort = generateSmartFallbackRecommendations(
+            watchedMovies,
+            [...watchlist, ...verifiedCandidates],
+            effectivePreferences,
+            dislikedCategories,
+            effectivePreviousTitles
+          );
+          for (const fb of lastResort) {
+            if (verifiedCandidates.length >= requestedLimit) break;
+            const t1 = normalizeMovieTitle(fb.title);
+            const fKey = getMovieFranchiseKey(fb.title, fb.originalTitle);
+            if (!existingNorms.has(t1) && (!fKey || !existingFranchises.has(fKey))) {
+              verifiedCandidates.push(fb);
+              existingNorms.add(t1);
+              if (fKey) existingFranchises.add(fKey);
+            }
+          }
+        }
+        verifiedCandidates = dedupeVerified(verifiedCandidates, true);
+      }
+
+      const finalRecs = await Promise.all(
+        verifiedCandidates.slice(0, requestedLimit).map(async (rec) => {
+          let finalTitle = rec.title;
+          if (hasNonLatinScript(finalTitle) && tmdbKey && rec.tmdbId) {
+            const enTitle = await fetchTmdbEnglishTitle(
+              rec.tmdbId,
+              rec.mediaType === "tv" ? "tv" : "movie",
+              tmdbKey
+            );
+            if (enTitle) finalTitle = enTitle;
+          }
+          let finalAgeRating = normalizeSwedishAgeRating(rec.ageRating);
+          if (!finalAgeRating && tmdbKey && rec.tmdbId) {
+            finalAgeRating = await fetchTmdbAgeRating(
+              rec.tmdbId,
+              rec.mediaType === "tv" ? "tv" : "movie",
+              tmdbKey
+            );
+          }
+          if (!finalAgeRating) {
+            finalAgeRating = inferAgeRatingFromGenres(rec.tmdbGenreIds);
+          }
+          let finalSeasonCount = rec.seasonCount;
+          if (rec.mediaType === "tv" && !finalSeasonCount) {
+            if (tmdbKey && rec.tmdbId) {
+              try {
+                const tvDetails = (await fetchFromTmdbApi(
+                  `/tv/${rec.tmdbId}?language=sv-SE`,
+                  tmdbKey
+                )) as { number_of_seasons?: number };
+                if (
+                  typeof tvDetails?.number_of_seasons === "number" &&
+                  tvDetails.number_of_seasons > 0
+                ) {
+                  finalSeasonCount = tvDetails.number_of_seasons;
+                }
+              } catch {
+                // Fallback below
+              }
+            }
+            if (!finalSeasonCount) {
+              finalSeasonCount = getSeriesSeasonCount(rec.title);
+            }
+          }
+          let finalRuntime = rec.runtime;
+          if (
+            rec.mediaType === "movie" &&
+            rec.runtimeMinutes &&
+            (!finalRuntime || finalRuntime === "Film")
+          ) {
+            finalRuntime =
+              formatRuntimeMinutes(rec.runtimeMinutes) || finalRuntime;
+          } else if (
+            rec.mediaType === "tv" &&
+            finalSeasonCount &&
+            (!finalRuntime || finalRuntime === "TV-serie")
+          ) {
+            finalRuntime =
+              finalSeasonCount === 1
+                ? "1 säsong"
+                : `${finalSeasonCount} säsonger`;
+          }
+          return {
+            ...rec,
+            title: finalTitle,
+            runtime: finalRuntime,
+            seasonCount: rec.mediaType === "tv" ? finalSeasonCount : undefined,
+            ageRating: finalAgeRating,
+          };
+        })
+      );
 
       res.json({ recommendations: finalRecs });
     } catch {
@@ -1263,36 +2058,12 @@ Skriv en träffsäker, personlig sammanfattning på svenska (3–4 meningar, dir
 Svara ENDAST med ett JSON-objekt på formatet: {"summary": "Din personliga sammanfattning här..."}`;
 
         try {
-          let response;
-          const modelsToTry: Array<{ name: string; disableThinking: boolean }> = [
-            { name: "gemini-2.5-flash", disableThinking: true },
-            { name: "gemini-2.0-flash", disableThinking: true },
-            { name: "gemini-1.5-flash", disableThinking: false },
-            { name: "gemini-2.5-pro", disableThinking: false },
-            { name: "gemini-3-flash-preview", disableThinking: true },
-            { name: "gemini-3.1-flash-lite-preview", disableThinking: true },
-          ];
-          for (const modelSpec of modelsToTry) {
-            try {
-              response = await ai.models.generateContent({
-                model: modelSpec.name,
-                contents: prompt,
-                config: {
-                  responseMimeType: "application/json",
-                  ...(modelSpec.disableThinking
-                    ? { thinkingConfig: { thinkingBudget: 0 } }
-                    : {}),
-                  temperature: 0.7,
-                  abortSignal: AbortSignal.timeout(10000),
-                },
-              });
-              if (response?.text) break;
-            } catch {
-              // Try next model
-            }
-          }
-
-          const rawText = response?.text?.trim();
+          const rawText = await callGeminiWithFallback(ai, {
+            contents: prompt,
+            temperature: 0.7,
+            responseMimeType: "application/json",
+            label: "taste-profile",
+          });
           if (rawText) {
             const cleanedText = rawText
               .replace(/^```json\s*/i, "")
@@ -1305,8 +2076,11 @@ Svara ENDAST med ett JSON-objekt på formatet: {"summary": "Din personliga samma
               return res.json({ summary: parsed.summary.trim() });
             }
           }
-        } catch {
-          // Graceful fallback below
+        } catch (parseErr) {
+          console.warn(
+            "[Gemini:taste-profile] Failed to parse JSON response:",
+            parseErr instanceof Error ? parseErr.message : String(parseErr)
+          );
         }
       }
 

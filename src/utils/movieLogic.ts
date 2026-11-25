@@ -22,6 +22,11 @@ export interface TmdbMovieEnrichment {
   tmdbGenreIds?: number[];
   tmdbGenres?: string[];
   seasonCount?: number;
+  runtimeMinutes?: number;
+  episodeRuntimeMinutes?: number;
+  tvStatus?: string;
+  originalLanguage?: string;
+  ageRating?: string;
 }
 
 export interface SeasonRating {
@@ -51,6 +56,7 @@ export interface WatchedMovie {
   tmdbGenres?: string[];
   seasonCount?: number;
   seasons?: SeasonRating[]; // Säsongsbetyg om serien bedömts per säsong
+  ageRating?: string;
 }
 
 export interface MovieRecommendation {
@@ -59,8 +65,12 @@ export interface MovieRecommendation {
   originalTitle?: string;
   year: string;
   runtime: string;
+  runtimeMinutes?: number;
   mediaType?: "movie" | "tv";
   seasonCount?: number;
+  episodeRuntimeMinutes?: number;
+  tvStatus?: string;
+  originalLanguage?: string;
   matchPercentage: number;
   whyYouWillLikeIt: string;
   vibeTags: string[];
@@ -71,12 +81,159 @@ export interface MovieRecommendation {
   swedishProviders?: SwedishWatchProviders;
   tmdbGenreIds?: number[];
   tmdbGenres?: string[];
+  ageRating?: string;
 }
 
 export interface ExpandableChipGroup {
   id: string;
   label: string;
   subchips: readonly string[];
+}
+
+export interface MovieSteeringSliders {
+  mood: number; // -2 (Mycket varmare/lättare) .. 0 (Samma) .. +2 (Mycket mörkare/tyngre)
+  pace: number; // -2 (Mycket lugnare/mer atmosfär) .. 0 (Samma) .. +2 (Mycket snabbare/mer fart)
+  depth: number; // -2 (Mycket enklare/koppla av) .. 0 (Samma) .. +2 (Mycket djupare/mer tankeväckande)
+  tone: number; // -2 (Mycket mer humor/lekfullt) .. 0 (Samma) .. +2 (Mycket mer allvar/spänning)
+}
+
+export interface MovieSteeringContext {
+  anchorMovie: {
+    title: string;
+    originalTitle?: string;
+    year?: string;
+    runtime?: string;
+    mediaType?: "movie" | "tv";
+    vibeTags?: string[];
+    tmdbGenres?: string[];
+  };
+  sliders: MovieSteeringSliders;
+  quickTweaks: string[];
+  note?: string;
+}
+
+export const DEFAULT_STEERING_SLIDERS: MovieSteeringSliders = {
+  mood: 0,
+  pace: 0,
+  depth: 0,
+  tone: 0,
+};
+
+export const STEERING_QUICK_TWEAKS = [
+  "Kortare",
+  "Nyare",
+  "Dold pärla",
+  "Starkare twist",
+  "Mer känslosam",
+] as const;
+
+export function describeSteeringAdjustments(
+  steering?: MovieSteeringContext | null
+): string[] {
+  if (!steering) return [];
+  const parts: string[] = [];
+  const { mood, pace, depth, tone } = steering.sliders;
+
+  if (mood <= -2) parts.push("mycket varmare och lättare i tonen");
+  else if (mood === -1) parts.push("lite varmare och lättare");
+  else if (mood === 1) parts.push("lite mörkare och tyngre");
+  else if (mood >= 2) parts.push("mycket mörkare, råare och tyngre");
+
+  if (pace <= -2) parts.push("mycket lugnare och mer atmosfäriskt tempo");
+  else if (pace === -1) parts.push("lite lugnare och mer stämningsfullt");
+  else if (pace === 1) parts.push("lite snabbare tempo och mer driv");
+  else if (pace >= 2) parts.push("mycket högre tempo och mer action/fart direkt");
+
+  if (depth <= -2) parts.push("mycket enklare och mer lättsmält för att koppla av");
+  else if (depth === -1) parts.push("lite mer lättillgänglig och avslappnad");
+  else if (depth === 1) parts.push("lite djupare och mer tankeväckande");
+  else if (depth >= 2) parts.push("mycket djupare, smartare och mer tankeväckande");
+
+  if (tone <= -2) parts.push("mycket mer humor och lekfullhet");
+  else if (tone === -1) parts.push("lite mer humor och charm");
+  else if (tone === 1) parts.push("lite mer allvar och spänning");
+  else if (tone >= 2) parts.push("mycket mer allvar, nerv och spänning");
+
+  for (const tweak of steering.quickTweaks || []) {
+    if (tweak.trim()) parts.push(tweak.trim());
+  }
+
+  if (steering.note && steering.note.trim()) {
+    parts.push(steering.note.trim());
+  }
+
+  return parts;
+}
+
+export function buildSteeringPromptLines(
+  steering?: MovieSteeringContext | null
+): string[] {
+  if (!steering) return [];
+  const lines: string[] = [];
+  const { mood, pace, depth, tone } = steering.sliders;
+  const anchorRuntime = steering.anchorMovie?.runtime;
+  const anchorYear = steering.anchorMovie?.year;
+
+  if (mood <= -2) lines.push("KÄNSLA: Mycket varmare, ljusare och lättare i tonen än referensfilmen.");
+  else if (mood === -1) lines.push("KÄNSLA: Lite varmare och lättare än referensfilmen.");
+  else if (mood === 1) lines.push("KÄNSLA: Lite mörkare och tyngre än referensfilmen.");
+  else if (mood >= 2) lines.push("KÄNSLA: Mycket mörkare, råare och tyngre än referensfilmen.");
+
+  if (pace <= -2) lines.push("TEMPO: Mycket lugnare och mer atmosfäriskt tempo än referensfilmen.");
+  else if (pace === -1) lines.push("TEMPO: Lite lugnare och mer stämningsfullt.");
+  else if (pace === 1) lines.push("TEMPO: Lite snabbare tempo och mer driv.");
+  else if (pace >= 2) lines.push("TEMPO: Mycket högre tempo och mer action/fart direkt från start.");
+
+  if (depth <= -2) lines.push("HJÄRNKAPACITET: Mycket enklare och mer lättsmält för att koppla av.");
+  else if (depth === -1) lines.push("HJÄRNKAPACITET: Lite mer lättillgänglig och avslappnad.");
+  else if (depth === 1) lines.push("HJÄRNKAPACITET: Lite djupare och mer tankeväckande.");
+  else if (depth >= 2) lines.push("HJÄRNKAPACITET: Mycket djupare, smartare och mer tankeväckande.");
+
+  if (tone <= -2) lines.push("TON: Mycket mer humor, charm och lekfullhet.");
+  else if (tone === -1) lines.push("TON: Lite mer humor och charm.");
+  else if (tone === 1) lines.push("TON: Lite mer allvar och spänning.");
+  else if (tone >= 2) lines.push("TON: Mycket mer allvar, nerv och spänning.");
+
+  for (const rawTweak of steering.quickTweaks || []) {
+    const tweak = rawTweak.trim();
+    if (!tweak) continue;
+    if (tweak === "Kortare") {
+      lines.push(
+        anchorRuntime
+          ? `KORTARE ÄN REFERENSFILMEN (100% HÅRT KRAV): Referensfilmen har speltiden ${anchorRuntime}. Samtliga 5 förslag MÅSTE vara märkbart kortare än ${anchorRuntime} (för serier: färre säsonger eller kortare total speltid). Föreslå ALDRIG en titel som är lika lång eller längre än ${anchorRuntime}!`
+          : "KORTARE ÄN REFERENSFILMEN (100% HÅRT KRAV): Samtliga 5 förslag MÅSTE ha en märkbart kortare speltid än referensfilmen (för serier: färre säsonger eller kortare total speltid). Föreslå ALDRIG en titel som är lika lång eller längre än referensfilmen!"
+      );
+    } else if (tweak === "Nyare") {
+      const anchorYearNum = Number(anchorYear);
+      const minSuggestedYear =
+        !Number.isNaN(anchorYearNum) && anchorYearNum >= 2015
+          ? Math.max(2018, anchorYearNum)
+          : 2018;
+      lines.push(
+        `NYARE TITLAR (100% HÅRT KRAV): Samtliga 5 förslag MÅSTE vara nya/moderna – utgivna från ${minSuggestedYear} eller senare. Föreslå ALDRIG äldre filmer från 90- eller 00-talet!`
+      );
+    } else if (tweak === "Dold pärla") {
+      lines.push(
+        "DOLDA PÄRLOR (100% HÅRT KRAV): Undvik uppenbara mainstream-blockbusters och de mest kända standardklassikerna. Välj hyllade men mindre kända indiefilmer, internationella mästerverk eller underskattade guldkorn!"
+      );
+    } else if (tweak === "Starkare twist") {
+      lines.push(
+        "STARKARE TWIST (100% HÅRT KRAV): Samtliga 5 förslag MÅSTE ha en tydlig, minnesvärd vändning, överraskande avslöjande eller smart pusselstruktur."
+      );
+    } else if (tweak === "Mer känslosam") {
+      lines.push(
+        "MER KÄNSLOSAM (100% HÅRT KRAV): Samtliga 5 förslag MÅSTE ha starkt hjärta, emotionellt djup och berörande mänskliga relationer."
+      );
+    } else {
+      lines.push(`EXTRA KRAV: ${tweak}`);
+    }
+  }
+
+  if (steering.note && steering.note.trim()) {
+    lines.push(`ANVÄNDARENS EGNA NOTERING (HÅRT KRAV): "${steering.note.trim()}"`);
+  }
+
+  return lines;
 }
 
 export interface EveningPreferences {
@@ -87,6 +244,7 @@ export interface EveningPreferences {
   customText: string;
   streamingProviders?: string[];
   mediaType?: "any" | "movie" | "tv";
+  steering?: MovieSteeringContext | null;
 }
 
 export const SWEDISH_STREAMING_SERVICES = [
@@ -229,6 +387,193 @@ export function mapTmdbGenreIdsToNames(genreIds?: number[]): string[] {
     }
   }
   return names;
+}
+
+/**
+ * Normalizes Swedish or international movie/TV age certifications into
+ * clean Swedish age rating labels: "Btl", "7+", "11+", "15+", or "18+".
+ */
+export function normalizeSwedishAgeRating(
+  raw?: string | null
+): string | undefined {
+  if (!raw || typeof raw !== "string") return undefined;
+  const cleaned = raw.trim().toUpperCase();
+  if (!cleaned || cleaned === "NR" || cleaned === "UNRATED" || cleaned === "N/A") {
+    return undefined;
+  }
+
+  // Exact or Swedish formats
+  if (
+    cleaned === "BTL" ||
+    cleaned === "BARNTILLÅTEN" ||
+    cleaned === "ALLA" ||
+    cleaned === "ALLA ÅLDRAR" ||
+    cleaned === "0" ||
+    cleaned === "0+" ||
+    cleaned === "A" ||
+    cleaned === "G" ||
+    cleaned === "U" ||
+    cleaned === "TV-G" ||
+    cleaned === "TV-Y" ||
+    cleaned === "S" ||
+    cleaned === "AL"
+  ) {
+    return "Btl";
+  }
+
+  if (
+    cleaned === "7" ||
+    cleaned === "7+" ||
+    cleaned === "7 ÅR" ||
+    cleaned === "FRÅN 7 ÅR" ||
+    cleaned === "6" ||
+    cleaned === "6+" ||
+    cleaned === "PG" ||
+    cleaned === "TV-Y7" ||
+    cleaned === "TV-Y7-FV" ||
+    cleaned === "TV-PG" ||
+    cleaned === "K-7"
+  ) {
+    return "7+";
+  }
+
+  if (
+    cleaned === "11" ||
+    cleaned === "11+" ||
+    cleaned === "11 ÅR" ||
+    cleaned === "FRÅN 11 ÅR" ||
+    cleaned === "9" ||
+    cleaned === "10" ||
+    cleaned === "12" ||
+    cleaned === "12+" ||
+    cleaned === "12A" ||
+    cleaned === "13" ||
+    cleaned === "13+" ||
+    cleaned === "PG-13" ||
+    cleaned === "TV-14" ||
+    cleaned === "14" ||
+    cleaned === "14+" ||
+    cleaned === "K-12"
+  ) {
+    return "11+";
+  }
+
+  if (
+    cleaned === "15" ||
+    cleaned === "15+" ||
+    cleaned === "15 ÅR" ||
+    cleaned === "FRÅN 15 ÅR" ||
+    cleaned === "16" ||
+    cleaned === "16+" ||
+    cleaned === "R" ||
+    cleaned === "TV-MA" ||
+    cleaned === "MA15+" ||
+    cleaned === "K-16"
+  ) {
+    return "15+";
+  }
+
+  if (
+    cleaned === "18" ||
+    cleaned === "18+" ||
+    cleaned === "18 ÅR" ||
+    cleaned === "NC-17" ||
+    cleaned === "X" ||
+    cleaned === "K-18"
+  ) {
+    return "18+";
+  }
+
+  // Extract numeric age fallback (e.g. "Från 11 år" or "FSK 12")
+  const numMatch = cleaned.match(/\b(\d{1,2})\b/);
+  if (numMatch) {
+    const age = Number(numMatch[1]);
+    if (age <= 5) return "Btl";
+    if (age <= 9) return "7+";
+    if (age <= 14) return "11+";
+    if (age <= 17) return "15+";
+    return "18+";
+  }
+
+  return undefined;
+}
+
+const AGE_RATING_COUNTRY_PRIORITY = ["SE", "NO", "DK", "FI", "GB", "US", "DE"];
+
+export function parseTmdbMovieAgeRating(
+  releaseDatesData: unknown
+): string | undefined {
+  if (!releaseDatesData || typeof releaseDatesData !== "object") {
+    return undefined;
+  }
+  const results = (releaseDatesData as { results?: unknown }).results;
+  if (!Array.isArray(results)) return undefined;
+
+  const byCountry = new Map<string, Array<{ certification?: string }>>();
+  for (const entry of results) {
+    if (!entry || typeof entry !== "object") continue;
+    const iso = String(
+      (entry as { iso_3166_1?: string }).iso_3166_1 || ""
+    ).toUpperCase();
+    const dates = (entry as { release_dates?: unknown }).release_dates;
+    if (iso && Array.isArray(dates)) {
+      byCountry.set(iso, dates as Array<{ certification?: string }>);
+    }
+  }
+
+  for (const country of AGE_RATING_COUNTRY_PRIORITY) {
+    const dates = byCountry.get(country);
+    if (!dates) continue;
+    for (const d of dates) {
+      const normalized = normalizeSwedishAgeRating(d?.certification);
+      if (normalized) return normalized;
+    }
+  }
+  return undefined;
+}
+
+export function parseTmdbTvAgeRating(
+  contentRatingsData: unknown
+): string | undefined {
+  if (!contentRatingsData || typeof contentRatingsData !== "object") {
+    return undefined;
+  }
+  const results = (contentRatingsData as { results?: unknown }).results;
+  if (!Array.isArray(results)) return undefined;
+
+  const byCountry = new Map<string, string>();
+  for (const entry of results) {
+    if (!entry || typeof entry !== "object") continue;
+    const iso = String(
+      (entry as { iso_3166_1?: string }).iso_3166_1 || ""
+    ).toUpperCase();
+    const rating = String((entry as { rating?: string }).rating || "").trim();
+    if (iso && rating) {
+      byCountry.set(iso, rating);
+    }
+  }
+
+  for (const country of AGE_RATING_COUNTRY_PRIORITY) {
+    const raw = byCountry.get(country);
+    if (!raw) continue;
+    const normalized = normalizeSwedishAgeRating(raw);
+    if (normalized) return normalized;
+  }
+  return undefined;
+}
+
+export function inferAgeRatingFromGenres(tmdbGenreIds?: number[]): string {
+  const ids = new Set((tmdbGenreIds || []).map(Number));
+  if (ids.has(27)) return "15+"; // Skräck
+  if (ids.has(10752) || ids.has(10768)) return "15+"; // Krig
+  if (ids.has(80) && (ids.has(53) || ids.has(28))) return "15+"; // Krim + Thriller/Action
+  if (ids.has(10762)) return "Btl"; // Barn
+  if (ids.has(10751)) return ids.has(12) || ids.has(14) || ids.has(28) ? "7+" : "Btl"; // Familj
+  if (ids.has(16) && !ids.has(28) && !ids.has(53) && !ids.has(80)) return "7+"; // Animerat
+  if (ids.has(53) || ids.has(80)) return "15+"; // Thriller / Krim
+  if (ids.has(28) || ids.has(10759) || ids.has(878) || ids.has(10765)) return "11+"; // Action / Sci-Fi
+  if (ids.has(35) || ids.has(10749) || ids.has(99) || ids.has(10402)) return "7+"; // Komedi / Romantik / Dokumentär
+  return "11+";
 }
 
 export const KNOWN_SERIES_SEASON_COUNTS: Record<string, number> = {
@@ -575,6 +920,896 @@ interface TmdbCategoryRule {
   allowedGenreIds: number[];
 }
 
+export interface TmdbDiscoverFilters {
+  originCountries: string[];
+  originalLanguages: string[];
+  companyIds: number[];
+  keywordGroups: number[][];
+  withoutKeywordIds: number[];
+  fallbackGenreIds: number[];
+  withoutGenreIds: number[];
+  minRuntime?: number;
+  maxRuntime?: number;
+  maxYearOverride?: number;
+  tvMaxEpisodeRuntime?: number;
+  tvEndedOnly?: boolean;
+  tvMiniseriesOnly?: boolean;
+  tvShortSeries?: boolean;
+  sortBy?: string;
+  minVoteCount?: number;
+  maxVoteCount?: number;
+  minVoteAverage?: number;
+}
+
+export const ALL_TV_SERIES_LENGTH_CHIPS: readonly string[] = [
+  "Serielängd",
+  "Miniserie",
+  "1–2 säsonger",
+  "3–5 säsonger",
+  "6+ säsonger",
+  "Korta avsnitt",
+  "Avslutad serie",
+  "Miniserie (1 kort säsong)",
+  "Kort serie (1–2 säsonger)",
+  "Mellanlång serie (3–5 säsonger)",
+  "Långkörare (6+ säsonger)",
+  "Avslutad serie (helt färdig)",
+];
+
+export const ALL_MOVIE_LENGTH_CHIPS: readonly string[] = [
+  "Speltid",
+  "Max 90 min",
+  "Max 90 minuter",
+  "Max 2 tim",
+  "Max 2 timmar",
+  "Över 2 tim",
+  "2+ timmar (Långfilm)",
+];
+
+export function hasSeriesLengthFilter(preferences: EveningPreferences): boolean {
+  const moods = preferences.moods || [];
+  return moods.some((m) => ALL_TV_SERIES_LENGTH_CHIPS.includes(m));
+}
+
+export function hasMovieLengthFilter(preferences: EveningPreferences): boolean {
+  const moods = preferences.moods || [];
+  const frameworks = preferences.frameworks || [];
+  return [...moods, ...frameworks].some((m) =>
+    ALL_MOVIE_LENGTH_CHIPS.includes(m)
+  );
+}
+
+export function resolveEffectiveMediaType(
+  preferences: EveningPreferences
+): "any" | "movie" | "tv" {
+  if (hasSeriesLengthFilter(preferences) && preferences.mediaType !== "movie") {
+    return "tv";
+  }
+  if (
+    hasMovieLengthFilter(preferences) &&
+    !hasSeriesLengthFilter(preferences) &&
+    (!preferences.mediaType || preferences.mediaType === "any")
+  ) {
+    return "movie";
+  }
+  return preferences.mediaType || "any";
+}
+
+export function parseRuntimeMinutes(runtime?: string): number | undefined {
+  if (!runtime || typeof runtime !== "string") return undefined;
+  const lower = runtime.toLowerCase().trim();
+  if (!lower || lower.includes("säsong") || lower.includes("miniserie")) {
+    return undefined;
+  }
+  const hrMinMatch = lower.match(/(\d+)\s*(?:tim(?:mar)?|h)\s*(?:(\d+)\s*m(?:in)?)?/);
+  if (hrMinMatch) {
+    const hours = Number(hrMinMatch[1]);
+    const mins = hrMinMatch[2] ? Number(hrMinMatch[2]) : 0;
+    if (!Number.isNaN(hours) && hours > 0 && hours <= 12) {
+      return hours * 60 + (Number.isNaN(mins) ? 0 : mins);
+    }
+  }
+  const minOnlyMatch = lower.match(/\b(\d{2,3})\s*min\b/);
+  if (minOnlyMatch) {
+    const mins = Number(minOnlyMatch[1]);
+    if (!Number.isNaN(mins) && mins >= 20 && mins <= 600) {
+      return mins;
+    }
+  }
+  return undefined;
+}
+
+export function formatRuntimeMinutes(minutes?: number): string | undefined {
+  if (typeof minutes !== "number" || Number.isNaN(minutes) || minutes <= 0) {
+    return undefined;
+  }
+  const rounded = Math.round(minutes);
+  const hours = Math.floor(rounded / 60);
+  const mins = rounded % 60;
+  if (hours === 0) return `${mins} min`;
+  if (mins === 0) return `${hours} tim`;
+  return `${hours} tim ${mins} min`;
+}
+
+export function hasNonLatinScript(text?: string): boolean {
+  if (!text) return false;
+  return (
+    /\p{L}/u.test(text) &&
+    /[^\p{Script=Latin}\p{N}\p{P}\p{Z}\p{S}]/u.test(text)
+  );
+}
+
+export function extractTmdbDiscoverFilters(
+  preferences: EveningPreferences
+): TmdbDiscoverFilters {
+  const allSelected = [
+    ...(preferences.genres || []),
+    ...(preferences.contents || []),
+    ...(preferences.frameworks || []),
+    ...(preferences.moods || []),
+  ];
+  const fw = preferences.frameworks || [];
+  const moods = preferences.moods || [];
+
+  const originCountries: string[] = [];
+  const originalLanguages: string[] = [];
+  const companyIds: number[] = [];
+  const keywordGroups: number[][] = [];
+  const withoutKeywordSet = new Set<number>();
+  const fallbackGenreSet = new Set<number>();
+  const withoutGenreSet = new Set<number>();
+
+  const addCountry = (...codes: string[]) => {
+    for (const c of codes) {
+      if (!originCountries.includes(c)) originCountries.push(c);
+    }
+  };
+  const addLang = (...langs: string[]) => {
+    for (const l of langs) {
+      if (!originalLanguages.includes(l)) originalLanguages.push(l);
+    }
+  };
+  const addCompany = (...ids: number[]) => {
+    for (const id of ids) {
+      if (!companyIds.includes(id)) companyIds.push(id);
+    }
+  };
+  const addKeywords = (...ids: number[]) => {
+    if (ids.length > 0) keywordGroups.push(ids);
+  };
+  const addWithoutKeywords = (...ids: number[]) => {
+    for (const id of ids) withoutKeywordSet.add(id);
+  };
+  const addFallbackGenres = (...ids: number[]) => {
+    for (const id of ids) fallbackGenreSet.add(id);
+  };
+  const addWithoutGenres = (...ids: number[]) => {
+    for (const id of ids) withoutGenreSet.add(id);
+  };
+
+  const hasExplicitAction = allSelected.some((c) =>
+    ["Action", "Superhjältar", "Strid & Action", "Actionkomedi", "Actionromans", "Sci-Fi-action"].includes(c)
+  );
+  const hasExplicitAnimation = allSelected.some((c) =>
+    ["Animerat", "Anime", "Studio Ghibli", "Pixar", "Disney", "Vuxenanimation", "Animerad action"].includes(c)
+  );
+  const hasExplicitHorror = allSelected.some((c) =>
+    ["Skräck", "Psykologisk skräck", "Slasher", "Zombies", "Vampyrer", "Spöken", "Skräckkomedi"].includes(c)
+  );
+
+  // Origin countries & languages
+  if (fw.includes("Sverige") || fw.includes("Stockholm")) {
+    addCountry("SE");
+    addLang("sv");
+    if (fw.includes("Stockholm")) {
+      addKeywords(8085, 271015); // stockholm, sweden / stockholm
+    }
+  } else if (fw.includes("Sverige & Norden") || fw.includes("Norden")) {
+    addCountry("SE", "NO", "DK", "FI", "IS");
+  } else if (fw.includes("Europa")) {
+    addCountry("SE", "NO", "DK", "FI", "GB", "FR", "DE", "ES", "IT");
+  }
+  if (fw.includes("London")) {
+    addKeywords(212); // london, england (plats-nyckelord utan GB-låsning så alla genrer/länder i London kommer med)
+  }
+  if (fw.includes("Tokyo")) {
+    addCountry("JP");
+    addKeywords(233); // japan
+  }
+  if (fw.includes("New York")) {
+    addKeywords(242); // new york city
+  }
+
+  // Production companies (all live-verified via TMDB /3/company/{id})
+  if (allSelected.some((c) => ["Studio Ghibli", "Studio Ghibli-känsla"].includes(c))) {
+    addCompany(10342); // Studio Ghibli
+  }
+  if (allSelected.includes("Pixar")) {
+    addCompany(3); // Pixar
+  }
+  if (allSelected.includes("Disney")) {
+    addCompany(2, 6125); // Walt Disney Pictures, Walt Disney Animation Studios
+  }
+  if (allSelected.includes("Marvel")) {
+    addCompany(420); // Marvel Studios
+  }
+  if (allSelected.includes("DC")) {
+    addCompany(9993, 128064); // DC Entertainment, DC Films
+  }
+
+  // Anime / Studio Ghibli -> Japanese original language & Japan origin
+  if (
+    allSelected.some((c) =>
+      ["Anime", "Anime / Japansk animation", "Studio Ghibli", "Studio Ghibli-känsla"].includes(c)
+    )
+  ) {
+    addLang("ja");
+    addCountry("JP");
+  }
+
+  // Adult animation excludes Family / Kids
+  let minVoteAverage: number | undefined;
+  let maxYearOverride: number | undefined;
+  if (allSelected.includes("Vuxenanimation")) {
+    addWithoutGenres(10751, 10762);
+    minVoteAverage = 7.0;
+  }
+
+  // Superheroes (9715 = superhero, 2095 = anti hero, 33637 = super power, 155030 = superhero team)
+  if (
+    allSelected.some((c) =>
+      [
+        "Superhjältar",
+        "Marvel",
+        "DC",
+        "Antihjältar",
+        "Mörka hjältar",
+        "Superkrafter",
+        "Hjälteteam",
+      ].includes(c)
+    )
+  ) {
+    addKeywords(9715);
+    if (allSelected.includes("Antihjältar") || allSelected.includes("Mörka hjältar")) {
+      addKeywords(2095);
+    } else if (allSelected.includes("Superkrafter")) {
+      addKeywords(33637);
+    } else if (allSelected.includes("Hjälteteam")) {
+      addKeywords(155030, 265979); // superhero team, superhero teamup
+    }
+  }
+
+  // Narrow genre & content keywords (ALL live-verified via TMDB /3/keyword/{id})
+  if (allSelected.includes("Natur")) {
+    addKeywords(18330, 221355, 9902); // nature, nature documentary, wildlife
+  }
+  if (allSelected.includes("Vetenskap")) {
+    addKeywords(287067, 14760, 9882); // science, scientist, space
+  }
+  if (allSelected.includes("Historia")) {
+    addKeywords(282633, 15126, 1956, 2504); // history, historical, world war ii, world war i
+  }
+  if (allSelected.includes("Omaka par") || allSelected.includes("Buddy-komedi (Omaka par)")) {
+    addKeywords(167316, 187376); // buddy cop, odd couple
+  }
+  if (allSelected.includes("Urflippad") || allSelected.includes("Urflippad / Slapstick")) {
+    addKeywords(9253, 386752); // slapstick comedy, slapstick
+  }
+  if (allSelected.includes("Ungdomskomedi") || allSelected.includes("High school & Ungdom")) {
+    addKeywords(155722, 6270); // teen comedy, high school
+  }
+  if (allSelected.includes("Psykologisk") || allSelected.includes("Psykologisk thriller")) {
+    addKeywords(12565); // psychological thriller
+  }
+  if (allSelected.includes("Experiment") || allSelected.includes("Genetik, Kloning & Experiment")) {
+    addKeywords(1706, 240435); // experiment, scientific experiment
+  }
+  if (allSelected.includes("Retro-Sci-Fi")) {
+    maxYearOverride = 1989;
+  }
+  if (allSelected.includes("Rymdskräck") || allSelected.includes("Kosmisk & Sci-Fi-skräck")) {
+    addKeywords(9882, 252634, 9951); // space, outer space, alien
+  }
+  if (allSelected.includes("Relationsdrama")) {
+    addKeywords(14534, 15160); // relationship, divorce
+  }
+  if (allSelected.includes("Rivaler blir kära")) {
+    addKeywords(282986, 4516); // enemies to lovers, romantic rivalry
+  }
+  if (allSelected.includes("Förbjuden kärlek")) {
+    addKeywords(3691); // forbidden love
+  }
+  if (allSelected.includes("Vildmark")) {
+    addKeywords(3593, 10349); // wilderness, survival
+  }
+  if (allSelected.includes("Dröm eller verklighet")) {
+    addKeywords(10597, 346773, 9887); // lucid dreaming, dream, surrealism
+  }
+  if (allSelected.includes("Psykologiskt spel")) {
+    addKeywords(184312, 226106, 12565); // mind game, mind games, psychological thriller
+  }
+  if (allSelected.includes("Skydda någon")) {
+    addKeywords(3088); // bodyguard
+  }
+  if (allSelected.includes("Mörkt förflutet")) {
+    addKeywords(164148); // dark past
+  }
+  if (allSelected.includes("Egen rättvisa")) {
+    addKeywords(7002, 266013); // vigilante, vigilante justice
+  }
+  if (allSelected.includes("Instängda")) {
+    addKeywords(18029, 2147, 193110); // trapped, claustrophobia, locked room
+  }
+  if (allSelected.includes("Ny start")) {
+    addKeywords(208476, 34004, 224472, 253309); // starting over, second chance, new life, new beginning
+  }
+  if (allSelected.includes("Mörk fantasy") || allSelected.includes("Mörk Fantasy & Monsterjakt")) {
+    addKeywords(177895); // dark fantasy
+    if (!hasExplicitAnimation) addWithoutGenres(16, 10751);
+  }
+  if (allSelected.includes("Mörk deckare") || allSelected.includes("Becksvart Neo-Noir")) {
+    addKeywords(207268, 9807); // neo-noir, film noir
+  }
+  if (allSelected.includes("Rättssalsdrama")) {
+    addKeywords(33519, 214780, 11038); // courtroom, courtroom drama, trial
+  }
+  if (allSelected.includes("Psykologisk skräck")) {
+    addKeywords(295907, 12565); // psychological horror, psychological thriller
+  }
+  if (allSelected.includes("Sport") || allSelected.includes("Sportdrama")) {
+    addKeywords(6075); // sports
+  }
+  if (allSelected.includes("Musik") || allSelected.includes("Musikbiografi")) {
+    addKeywords(5565, 4344); // biography, musical
+  }
+  if (allSelected.includes("Klassisk musikal") || allSelected.includes("Musikal")) {
+    addKeywords(4344); // musical
+  }
+  if (allSelected.includes("Konsert")) {
+    addKeywords(6029, 156205); // concert, concert film
+  }
+  if (allSelected.includes("Rock")) {
+    addKeywords(11700, 155710); // rock music, rock musical
+  }
+  if (allSelected.includes("Pop")) {
+    addKeywords(33922); // pop music
+  }
+  if (allSelected.includes("Dansfilm")) {
+    addKeywords(1691); // dance
+  }
+  if (allSelected.includes("Kampsport") || allSelected.includes("Närkamp")) {
+    addKeywords(779); // martial arts
+  }
+  if (allSelected.includes("Biljakter")) {
+    addKeywords(382327, 9844); // car chase, car crash
+  }
+  if (allSelected.includes("Hämndaction") || allSelected.includes("Hämndthriller") || allSelected.includes("Hämnd") || allSelected.includes("Hämnd & Skydd")) {
+    addKeywords(9748); // revenge
+  }
+  if (allSelected.includes("Lönnmördare")) {
+    addKeywords(782); // assassin
+  }
+  if (allSelected.includes("Militär")) {
+    addKeywords(6092); // army
+  }
+  if (allSelected.includes("Svärdsstrider")) {
+    addKeywords(1938, 9725); // sword, sword fight
+  }
+  if (allSelected.includes("Turnering")) {
+    addKeywords(12380); // tournament
+  }
+  if (allSelected.includes("Prisjägare")) {
+    addKeywords(801); // bounty hunter
+  }
+  if (allSelected.includes("Svart komedi") || allSelected.includes("Mörk / Svart komedi")) {
+    addKeywords(10123, 383021); // dark comedy, black comedy
+  }
+  if (allSelected.includes("Parodi")) {
+    addKeywords(9755); // parody
+  }
+  if (allSelected.includes("Satir")) {
+    addKeywords(8201); // satire
+  }
+  if (allSelected.includes("Uppväxt")) {
+    addKeywords(10683); // coming of age
+  }
+  if (allSelected.includes("Djur")) {
+    addKeywords(18165, 361118); // animals, animal
+  }
+  if (allSelected.includes("Skattjakt")) {
+    addKeywords(6956, 215470); // treasure hunt, treasure hunter
+  }
+  if (allSelected.includes("Roadtrip")) {
+    addKeywords(7312); // road trip
+  }
+  if (allSelected.includes("Slasher")) {
+    addKeywords(12339); // slasher
+  }
+  if (allSelected.includes("Sekter")) {
+    addKeywords(6158, 162766); // cult, religious cult
+  }
+  if (allSelected.includes("Handkamera") || allSelected.includes("Found footage")) {
+    addKeywords(163053); // found footage
+  }
+  if (allSelected.includes("Monster")) {
+    addKeywords(1299); // monster
+  }
+  if (allSelected.includes("Monsterjakt")) {
+    addKeywords(303364, 9259, 186425, 1299); // monster hunter, vampire hunter, demon hunter, monster
+    if (!hasExplicitAnimation) addWithoutGenres(16, 10751);
+  }
+  if (allSelected.includes("Drakar")) {
+    addKeywords(12554); // dragon
+  }
+  if (allSelected.includes("Magi") || allSelected.includes("Uråldrig magi")) {
+    addKeywords(2343); // magic
+  }
+  if (allSelected.includes("Mytologi") || allSelected.includes("Mytologiska väsen")) {
+    addKeywords(2035); // mythology
+  }
+  if (allSelected.includes("Mordgåta") || allSelected.includes("Deckargåta")) {
+    addKeywords(207046, 12570); // murder mystery, whodunit
+  }
+  if (allSelected.includes("Slutet sällskap")) {
+    addKeywords(12570, 207046, 193110, 236429); // whodunit, murder mystery, locked room, locked room mystery
+  }
+  if (allSelected.includes("Detektiv") || allSelected.includes("Polis")) {
+    addKeywords(703); // detective
+  }
+  if (allSelected.includes("Undercover")) {
+    addKeywords(1568); // undercover
+  }
+  if (allSelected.includes("Verkliga brott")) {
+    addKeywords(33722); // true crime
+  }
+  if (allSelected.includes("Gisslandrama")) {
+    addKeywords(1562, 18233); // hostage, hostage situation
+  }
+  if (allSelected.includes("Hackers")) {
+    addKeywords(2157); // hacker
+  }
+  if (allSelected.includes("Katastrof") || allSelected.includes("Naturkatastrof")) {
+    addKeywords(10617, 5096); // disaster, natural disaster
+  }
+  if (allSelected.includes("Pandemi")) {
+    addKeywords(188973); // pandemic
+  }
+  if (allSelected.includes("Räddningsuppdrag")) {
+    addKeywords(10084, 11107); // rescue, rescue mission
+  }
+  if (allSelected.includes("AI") || allSelected.includes("Levande AI") || allSelected.includes("Robotar")) {
+    addKeywords(310); // artificial intelligence (a.i.)
+  }
+  if (allSelected.includes("Dystopi")) {
+    addKeywords(4565); // dystopia
+  }
+  if (allSelected.includes("Postapokalyps")) {
+    addKeywords(4458, 12332); // post-apocalyptic future, apocalypse
+  }
+  if (allSelected.includes("Utomjordingar")) {
+    addKeywords(9951); // alien
+  }
+  if (allSelected.includes("Parallella världar")) {
+    addKeywords(336874, 243230); // multiverse, parallel universe
+  }
+  if (allSelected.includes("Nära framtid")) {
+    addKeywords(244256, 4565); // near future, dystopia
+  }
+  if (allSelected.includes("Oväntad twist") || allSelected.includes("Twist & Gåta")) {
+    addKeywords(275311, 326438); // plot twist, twist ending
+  }
+  if (allSelected.includes("Opålitlig berättare")) {
+    addKeywords(174089); // unreliable narrator
+  }
+  if (allSelected.includes("Dubbelliv")) {
+    addKeywords(848); // double life
+  }
+  if (allSelected.includes("Minnesförlust")) {
+    addKeywords(1453); // amnesia
+  }
+  if (allSelected.includes("Hemligt sällskap")) {
+    addKeywords(2908); // secret society
+  }
+  if (allSelected.includes("Katt och råtta")) {
+    addKeywords(15076); // cat and mouse
+  }
+  if (allSelected.includes("Oskyldigt anklagad")) {
+    addKeywords(769, 12662, 15124, 271331); // falsely accused, wrongful imprisonment, framed, wrongly accused
+  }
+  if (allSelected.includes("Bluff")) {
+    addKeywords(10453); // con artist
+  }
+  if (allSelected.includes("Infiltration")) {
+    addKeywords(12347, 1568); // infiltration, undercover
+  }
+  if (allSelected.includes("Vänskap") || allSelected.includes("Vänskap & Relationer")) {
+    addKeywords(6054); // friendship
+  }
+  if (allSelected.includes("Familjekonflikt")) {
+    addKeywords(155294, 10041); // family conflict, dysfunctional family
+  }
+  if (allSelected.includes("Skilsmässa")) {
+    addKeywords(15160); // divorce
+  }
+  if (allSelected.includes("Föräldraskap")) {
+    addKeywords(15025); // parenting
+  }
+  if (allSelected.includes("Grannar")) {
+    addKeywords(10226); // neighbor
+  }
+  if (allSelected.includes("Underdog")) {
+    addKeywords(240); // underdog
+  }
+  if (allSelected.includes("Rivalitet")) {
+    addKeywords(9823); // rivalry
+  }
+  if (allSelected.includes("Mästare och lärjunge")) {
+    addKeywords(1310); // mentor
+  }
+  if (
+    allSelected.some((c) =>
+      ["Kostymdrama", "Historiskt kostymdrama", "Historisk romans"].includes(c)
+    )
+  ) {
+    addKeywords(15060, 195013, 207928); // period drama, costume drama, 19th century
+  }
+  if (allSelected.includes("Andra världskriget")) {
+    addKeywords(1956); // world war ii
+  }
+  if (
+    allSelected.some((c) =>
+      ["Verklighetsbaserat", "Biografi", "Biografi & Verkliga livsöden"].includes(c)
+    )
+  ) {
+    addKeywords(9672, 5565); // based on true story, biography
+  }
+  if (allSelected.includes("Tidsloop")) {
+    addKeywords(10854); // strictly time loop (not generic time travel)
+  } else if (
+    allSelected.some((c) =>
+      ["Tidsresor", "Tidsresor & Tidsloop", "Tidsresor / Tidsloop"].includes(c)
+    )
+  ) {
+    addKeywords(4379, 10854); // time travel, time loop
+  }
+  if (
+    allSelected.some((c) =>
+      ["Kupp & Heist", "Kupp", "Smart kupp", "Bankrån", "Bankrån & Heist", "Heist & Kupplan"].includes(c)
+    )
+  ) {
+    addKeywords(10051, 15363); // heist, bank robbery
+  }
+  if (
+    allSelected.some((c) =>
+      ["Överlevnad", "Överlevnad & Hot", "Överlevnadsthriller", "Överlevnad i vildmarken"].includes(c)
+    )
+  ) {
+    addKeywords(10349); // survival
+  }
+  if (allSelected.some((c) => ["Zombies", "Zombies & Smitta"].includes(c))) {
+    addKeywords(12377); // zombie
+  }
+  if (allSelected.includes("Vampyrer")) {
+    addKeywords(3133); // vampire
+  }
+  if (allSelected.some((c) => ["Spöken", "Övernaturligt & Spöken"].includes(c))) {
+    addKeywords(162846); // ghost
+  }
+  if (allSelected.includes("Forntid & Medeltid")) {
+    addKeywords(161257, 41406, 5049, 1405, 162861); // medieval, middle ages, ancient rome, roman empire, ancient greece
+    addWithoutKeywords(1956, 2504, 2652, 1739); // exclude WW2, WW1, Nazi, Holocaust
+    addWithoutGenres(10752);
+  }
+  if (allSelected.some((c) => ["Vikingar", "Vikingatid", "Vikingar & Nordisk myt"].includes(c))) {
+    addKeywords(5895, 384863, 363879); // vikings (norsemen), viking, vikings
+    addWithoutKeywords(1956, 2504, 2652, 1739);
+    if (!hasExplicitAnimation) addWithoutGenres(16, 10751);
+  }
+  if (allSelected.some((c) => ["Pirater", "Pirater & Havsäventyr"].includes(c))) {
+    addKeywords(12988); // pirate
+  }
+  if (allSelected.some((c) => ["Gladiatorer", "Antiken", "Antiken & Gladiatorer"].includes(c))) {
+    addKeywords(5049, 1394, 1405, 162861); // ancient rome, gladiator, roman empire, ancient greece
+    addWithoutKeywords(1956, 2504, 2652, 1739);
+  }
+  if (allSelected.some((c) => ["Medeltid", "Riddare", "Riddare & Medeltida riken"].includes(c))) {
+    addKeywords(161257, 41406, 10466, 4152); // medieval, middle ages, knight, kingdom
+    addWithoutKeywords(1956, 2504, 2652, 1739);
+  }
+  if (allSelected.includes("1700-tal")) {
+    addKeywords(160279); // 18th century
+    addWithoutKeywords(1956, 2504, 2652, 1739);
+    addWithoutGenres(10752);
+  }
+  if (allSelected.includes("1800-tal")) {
+    addKeywords(207928); // 19th century
+    addWithoutKeywords(1956, 2504, 2652, 1739);
+    addWithoutGenres(10752);
+  }
+  if (allSelected.includes("1920-tal")) {
+    addKeywords(207876); // 1920s
+  }
+  if (allSelected.includes("1940-tal")) {
+    addKeywords(207883); // 1940s
+  }
+  if (allSelected.includes("1970-tal")) {
+    addKeywords(1228); // 1970s
+  }
+  if (allSelected.includes("1980-tal")) {
+    addKeywords(208289); // 1980s
+  }
+  if (allSelected.includes("Julfilm")) {
+    addKeywords(207317, 65); // christmas, holiday
+  }
+  if (allSelected.some((c) => ["Maffia", "Maffiakrig", "Maffia & Gangstervärld"].includes(c))) {
+    addKeywords(10391, 3149); // mafia, gangster
+  }
+  if (allSelected.some((c) => ["Spioner", "Spionthriller", "Spion- & Agent-action"].includes(c))) {
+    addKeywords(470); // spy
+  }
+  if (allSelected.some((c) => ["Konspiration", "Konspirations- & Politisk thriller"].includes(c))) {
+    addKeywords(10410); // conspiracy
+  }
+  if (allSelected.some((c) => ["Seriemördare", "Seriemördarjakt", "Gåtfull mördare"].includes(c))) {
+    addKeywords(10714); // serial killer
+  }
+  if (allSelected.some((c) => ["Makt & Politik", "Politik", "Maktspel", "Intriger"].includes(c))) {
+    addKeywords(6078, 209817, 41282); // politics, political thriller, political intrigue
+    if (!hasExplicitAction) addWithoutGenres(28);
+    if (!hasExplicitAnimation) addWithoutGenres(16, 10751);
+  }
+  if (allSelected.includes("Korruption")) {
+    addKeywords(417, 6078); // corruption, politics
+  }
+  if (allSelected.includes("Kungahus")) {
+    addKeywords(2471, 9920); // monarchy, royalty
+    if (!hasExplicitAnimation) addWithoutGenres(16, 10751);
+  }
+  if (allSelected.includes("Företagsdrama")) {
+    addKeywords(10177, 12094); // corporate, business
+  }
+
+  // Setting keywords & fallback genres (ALL live-verified!)
+  if (fw.includes("Isolerade platser") || moods.includes("Klaustrofobisk")) {
+    addFallbackGenres(53, 9648, 27);
+    addKeywords(201713, 2147); // isolated, claustrophobia
+  }
+  if (fw.includes("Öde ö")) {
+    addFallbackGenres(12, 53, 18);
+    addKeywords(155746, 2041); // deserted island, island
+  }
+  if (fw.includes("Stuga")) {
+    addFallbackGenres(27, 53, 9648);
+    addKeywords(3623, 4010); // cabin, log cabin
+  }
+  if (fw.includes("Herrgård")) {
+    addFallbackGenres(9648, 53, 27, 18);
+    addKeywords(12545); // mansion
+  }
+  if (fw.includes("Fängelse") || allSelected.includes("Fängelsedrama")) {
+    addFallbackGenres(18, 80, 53);
+    addKeywords(378); // prison
+  }
+  if (fw.includes("Fartyg")) {
+    addFallbackGenres(12, 53, 18);
+    addKeywords(658, 3799); // sea, ship
+  }
+  if (fw.includes("Ubåt")) {
+    addFallbackGenres(53, 28, 10752);
+    addKeywords(339); // submarine
+  }
+  if (fw.includes("Tåg")) {
+    addFallbackGenres(53, 28, 9648);
+    addKeywords(13008); // train
+  }
+  if (fw.includes("Flygplan")) {
+    addFallbackGenres(53, 28);
+    addKeywords(3800, 12617); // airplane, airplane crash
+  }
+  if (fw.includes("Hotell")) {
+    addFallbackGenres(53, 9648, 18, 35);
+    addKeywords(612); // hotel
+  }
+  if (fw.includes("Bunker")) {
+    addFallbackGenres(53, 878, 27);
+    addKeywords(2321); // bunker
+  }
+  if (
+    fw.some((c) =>
+      ["Natur & Vildmark", "Skog", "Berg", "Vinter", "Öken", "Kust"].includes(c)
+    )
+  ) {
+    addFallbackGenres(12, 53, 18);
+    if (fw.includes("Berg")) addKeywords(1262); // mountain
+    else if (fw.includes("Skog")) addKeywords(5774); // forest
+    else if (fw.includes("Öken")) addKeywords(18034); // desert
+    else if (fw.includes("Kust")) addKeywords(658); // sea
+    else if (fw.includes("Vinter")) addKeywords(1442, 10794); // winter, snow
+    else addKeywords(3593, 18330); // wilderness, nature
+  }
+  if (fw.some((c) => ["Städer & Metropoler", "Storstad"].includes(c))) {
+    addFallbackGenres(80, 53, 18);
+  }
+  if (fw.includes("Småstad")) {
+    addFallbackGenres(18, 9648, 53);
+    addKeywords(1415); // small town
+  }
+  if (fw.includes("Landsbygd")) {
+    addFallbackGenres(18, 10749, 35);
+    addKeywords(548, 251619, 4932); // countryside, rural, farm
+  }
+  if (
+    fw.some((c) =>
+      ["Skola & Jobb", "Skola", "Universitet", "Sjukhus", "Kontor", "Restaurang", "Advokatbyrå"].includes(c)
+    )
+  ) {
+    addFallbackGenres(18, 35);
+    if (fw.includes("Skola")) addKeywords(6270); // high school
+    else if (fw.includes("Universitet")) addKeywords(3616); // college
+    else if (fw.includes("Sjukhus")) addKeywords(11612, 13005, 258786); // hospital, doctor, medical
+    else if (fw.includes("Kontor")) addKeywords(1438, 6282); // office, workplace
+    else if (fw.includes("Restaurang")) addKeywords(1946); // restaurant
+    else if (fw.includes("Advokatbyrå")) addKeywords(10909, 162813); // lawyer, law firm
+    else addKeywords(6282, 6270); // workplace, high school
+  }
+
+  // Mood fallback genres + protective withoutGenres (so horror/action/erotica never leak into cozy/emotional/smart)
+  if (
+    moods.some((m) =>
+      ["Mörk & Nervkittlande", "Mörk", "Rå", "Nagelbitande", "Klaustrofobisk", "Hög puls"].includes(m)
+    )
+  ) {
+    addFallbackGenres(53, 80, 9648);
+  }
+  if (moods.includes("Kuslig")) {
+    addFallbackGenres(27, 9648, 53);
+  }
+  if (
+    moods.some((m) =>
+      ["Smart & Psykologisk", "Klurig", "Gåtfull", "Tankeväckande", "Oförutsägbar", "Drömsk"].includes(m)
+    )
+  ) {
+    addFallbackGenres(9648, 53);
+    if (!hasExplicitAction) {
+      addWithoutGenres(28, 12, 10751); // Exclude superhero/action/adventure blockbusters
+    }
+    if (moods.includes("Klurig") || moods.includes("Oförutsägbar")) {
+      addKeywords(275311, 326438, 12565); // plot twist, twist ending, psychological thriller
+    } else if (moods.includes("Gåtfull")) {
+      addKeywords(9228, 207046, 12565); // puzzle, murder mystery, psychological thriller
+    } else if (moods.includes("Drömsk")) {
+      addKeywords(9887, 10597, 346773); // surrealism, lucid dreaming, dream
+    } else if (moods.includes("Smart & Psykologisk")) {
+      addKeywords(12565, 275311); // psychological thriller, plot twist
+    }
+  }
+  if (
+    moods.some((m) =>
+      ["Feelgood & Mys", "Mysig", "Feelgood", "Lättsam", "Nostalgisk", "Slökolla", "Avkopplande"].includes(m)
+    )
+  ) {
+    addFallbackGenres(35, 10751, 10749);
+    if (!hasExplicitHorror) addWithoutGenres(27, 53, 80, 10752); // Never horror, thriller, crime, war in feelgood!
+  }
+  if (moods.includes("Skarp dialog")) {
+    addFallbackGenres(35, 18);
+    if (!hasExplicitAction) addWithoutGenres(28);
+    if (!hasExplicitAnimation) addWithoutGenres(16);
+    if (!hasExplicitHorror) addWithoutGenres(27);
+    addKeywords(319397); // witty
+  }
+  if (
+    moods.some((m) =>
+      ["Humor & Romantik", "Charmig", "Romantisk", "Knasig"].includes(m)
+    ) ||
+    allSelected.includes("Romantik")
+  ) {
+    if (moods.some((m) => ["Humor & Romantik", "Charmig", "Knasig"].includes(m))) {
+      addFallbackGenres(35, 10749);
+    }
+    if (!hasExplicitAction) addWithoutGenres(28);
+    if (!hasExplicitAnimation) addWithoutGenres(16);
+    if (!hasExplicitHorror) addWithoutGenres(27, 53, 10752);
+  }
+  if (
+    moods.some((m) =>
+      ["Episk & Spektakulär", "Storslagen", "Snyggt foto", "Inspirerande"].includes(m)
+    )
+  ) {
+    addFallbackGenres(12, 14, 878, 18);
+  }
+  if (
+    moods.some((m) =>
+      ["Känslosam & Gripande", "Gripande", "Vemodig", "Hjärtekrossande", "Tårframkallande"].includes(m)
+    )
+  ) {
+    addFallbackGenres(18);
+    addWithoutGenres(27, 28, 35, 53); // Pure emotional drama, no horror/action/comedy!
+  }
+  if (moods.some((m) => ["Högt tempo", "Intensivt"].includes(m))) {
+    addFallbackGenres(28, 53, 12);
+  }
+  if (moods.some((m) => ["Långsamt tempo", "Lugnt"].includes(m))) {
+    addFallbackGenres(18, 99);
+    addWithoutGenres(27, 28, 53); // Calm, never horror/action/thriller!
+  }
+
+  // Runtime & TV series length filters
+  let minRuntime: number | undefined;
+  let maxRuntime: number | undefined;
+  if (moods.includes("Max 90 min") || moods.includes("Max 90 minuter")) {
+    minRuntime = 45;
+    maxRuntime = 90;
+  } else if (
+    moods.includes("Max 2 tim") ||
+    moods.includes("Max 2 timmar") ||
+    fw.includes("Max 2 timmar")
+  ) {
+    minRuntime = 60;
+    maxRuntime = 120;
+  } else if (
+    moods.includes("Över 2 tim") ||
+    moods.includes("2+ timmar (Långfilm)") ||
+    fw.includes("2+ timmar (Långfilm)")
+  ) {
+    minRuntime = 121;
+  }
+
+  const tvMaxEpisodeRuntime = moods.includes("Korta avsnitt") ? 35 : undefined;
+  const tvEndedOnly =
+    moods.includes("Avslutad serie") ||
+    moods.includes("Avslutad serie (helt färdig)")
+      ? true
+      : undefined;
+  const tvMiniseriesOnly =
+    moods.includes("Miniserie") || moods.includes("Miniserie (1 kort säsong)")
+      ? true
+      : undefined;
+  const tvShortSeries =
+    moods.includes("1–2 säsonger") ||
+    moods.includes("Kort serie (1–2 säsonger)")
+      ? true
+      : undefined;
+
+  let sortBy: string | undefined;
+  let minVoteCount: number | undefined;
+  let maxVoteCount: number | undefined;
+  if (moods.includes("Mästerverk")) {
+    sortBy = "vote_average.desc";
+    minVoteCount = 2000;
+    minVoteAverage = 7.8;
+  } else if (moods.includes("Dold pärla")) {
+    sortBy = "vote_average.desc";
+    minVoteCount = 250;
+    maxVoteCount = 1200;
+    minVoteAverage = 7.4;
+    maxYearOverride = 2024;
+    if (!hasExplicitAnimation) addWithoutGenres(16);
+    addWithoutGenres(99, 10402);
+  }
+
+  return {
+    originCountries,
+    originalLanguages,
+    companyIds,
+    keywordGroups,
+    withoutKeywordIds: Array.from(withoutKeywordSet),
+    fallbackGenreIds: Array.from(fallbackGenreSet),
+    withoutGenreIds: Array.from(withoutGenreSet),
+    minRuntime,
+    maxRuntime,
+    maxYearOverride,
+    tvMaxEpisodeRuntime,
+    tvEndedOnly,
+    tvMiniseriesOnly,
+    tvShortSeries,
+    sortBy,
+    minVoteCount,
+    maxVoteCount,
+    minVoteAverage,
+  };
+}
+
 export function extractTmdbVerificationRules(preferences: EveningPreferences): {
   genreRules: TmdbCategoryRule[];
   minYear?: number;
@@ -599,29 +1834,45 @@ export function extractTmdbVerificationRules(preferences: EveningPreferences): {
     if (
       [
         "Action",
+        "Strid & Action",
+        "Kampsport",
         "Kampsport & Närkamp",
+        "Spioner",
         "Spion- & Agent-action",
+        "Hämndaction",
         "Hämnd-action (Vigilante)",
+        "Biljakter",
         "Biljakter & Adrenalin",
+        "Lönnmördare",
         "Gun-fu / Lönnmördare",
+        "Explosivt",
         "Over-the-top / Explosivt",
+        "Svärdsstrider",
         "Svärdsstrider / Närkamp",
+        "Närkamp",
         "Välkoreograferad action",
+        "En mot alla",
         "En mot alla (One-man army)",
+        "Turnering",
         "Gladiator- / Turnering & Arena",
+        "Prisjägare",
         "Prisjägare / Yrkesmördare",
       ].includes(chip)
     ) {
       addRule("action", "Action", [28, 10759]);
+    } else if (chip === "Kupp") {
+      // "Kupp" is a subchip under Action
+      addRule("action", "Action", [28, 10759]);
     } else if (
+      chip === "Militär" ||
       chip === "Militär & Specialstyrkor" ||
       chip === "Strid, Action & Hämnd"
     ) {
       addRule("action", "Action / Krig", [28, 10759, 10752, 10768]);
-    } else if (chip === "Action-romans") {
+    } else if (chip === "Actionromans" || chip === "Action-romans") {
       addRule("action", "Action", [28, 10759]);
       addRule("romance", "Romantik", [10749]);
-    } else if (chip === "Action-komedi") {
+    } else if (chip === "Actionkomedi" || chip === "Action-komedi") {
       addRule("action", "Action", [28, 10759]);
       addRule("comedy", "Komedi", [35]);
     } else if (chip === "Sci-Fi-action") {
@@ -633,61 +1884,111 @@ export function extractTmdbVerificationRules(preferences: EveningPreferences): {
     if (
       [
         "Komedi",
-        "Romantisk komedi (Rom-com)",
-        "Romantisk komedi",
+        "Svart komedi",
         "Mörk / Svart komedi",
+        "Omaka par",
         "Buddy-komedi (Omaka par)",
-        "Kriminalkomedi",
+        "Feelgood",
         "Feelgood-komedi",
+        "Parodi",
+        "Satir",
         "Satir & Parodi",
+        "Urflippad",
         "Urflippad / Slapstick",
+        "Ungdomskomedi",
         "High school & Ungdom",
-        "Dramakomedi (Dramedy)",
+        "Rolig",
         "Skrattfest & Charmig",
       ].includes(chip)
     ) {
       addRule("comedy", "Komedi", [35]);
+    } else if (
+      chip === "Romantisk komedi" ||
+      chip === "Romantisk komedi (Rom-com)"
+    ) {
+      addRule("comedy", "Komedi", [35]);
+      addRule("romance", "Romantik", [10749]);
+    } else if (chip === "Kriminalkomedi") {
+      addRule("comedy", "Komedi", [35]);
+      addRule("crime_mystery", "Krim / Mysterium", [80, 9648]);
+    } else if (chip === "Dramakomedi" || chip === "Dramakomedi (Dramedy)") {
+      addRule("comedy", "Komedi", [35]);
+      addRule("drama", "Drama", [18]);
     }
 
     // 3. Sci-Fi & Rymden
     if (
       [
         "Sci-Fi",
+        "Rymdäventyr",
         "Rymdäventyr & Främmande planeter",
+        "Tidsresor",
+        "Tidsloop",
         "Tidsresor & Tidsloop",
+        "AI",
+        "Robotar",
         "Cyberpunk & AI / Robotar",
+        "Dystopi",
+        "Postapokalyps",
         "Dystopi & Postapokalyps",
+        "Utomjordingar",
         "Utomjordingar / First Contact",
+        "Klurig Sci-Fi",
         "Mind-bending Sci-Fi",
+        "Realistisk Sci-Fi",
         "Realistisk hård Sci-Fi",
+        "Experiment",
         "Genetik, Kloning & Experiment",
+        "Retro-Sci-Fi",
         "Retro-futurism / Steampunk",
+        "Tidsresor & Sci-Fi",
         "Tidsresor, Lore & Sci-Fi",
         "Tidsresor / Tidsloop",
+        "Parallella världar",
         "Parallella universum / Multiverse",
+        "Levande AI",
         "AI / Robot med medvetande",
+        "Rymd & Framtid",
         "Rymden & Framtiden",
+        "Rymdskepp",
         "Rymdskepp & Rymdstation",
         "Främmande planet",
+        "Framtidsstad",
         "Cyberpunk-megastad",
+        "Nära framtid",
         "Nära framtid (High-tech)",
       ].includes(chip)
     ) {
       addRule("scifi", "Sci-Fi", [878, 10765]);
+    } else if (chip === "Stort världsbygge") {
+      addRule("worldbuilding", "Sci-Fi / Fantasy", [878, 14, 10765, 12]);
     }
 
     // 4. Fantasy
     if (
       [
         "Fantasy",
+        "Monster & Fantasy",
+        "Drakar",
         "Episk High Fantasy (Alver & Drakar)",
+        "Mörk fantasy",
         "Mörk Fantasy & Monsterjakt",
+        "Magi",
+        "Uråldrig magi",
         "Svärd & Magi (Sword & Sorcery)",
+        "Mytologi",
         "Mytologi & Folklore",
+        "Mytologiska väsen",
+        "Utvald hjälte",
+        "Mörk saga",
         "Gotisk saga",
+        "Nutida fantasy",
         "Urban / Nutida Fantasy",
+        "Riddare",
         "Riddare & Medeltida riken",
+        "Annan värld",
         "Portal till annan värld",
+        "Monsterjakt",
         "Monster / Mörk fantasy",
       ].includes(chip)
     ) {
@@ -698,43 +1999,98 @@ export function extractTmdbVerificationRules(preferences: EveningPreferences): {
     if (
       [
         "Krim & Mysterium",
+        "Krim & Utredning",
+        "Mordgåta",
         "Pusseldeckare (Whodunnit)",
+        "Mörk deckare",
         "Becksvart Neo-Noir",
+        "Maffia",
+        "Maffiakrig",
         "Maffia & Gangstervärld",
+        "Polis",
+        "Detektiv",
         "Polisutredning & Detektiv",
         "Seriemördarjakt",
+        "Bankrån",
         "Bankrån & Heist",
         "Rättssalsdrama",
-        "True Crime (Verklighetsbaserat)",
+        "Undercover",
         "Undercover & Infiltratör",
         "Gåta, Brott & Kupp",
+        "Deckargåta",
         "Kriminalgåta / Däckare",
+        "Slutet sällskap",
         "Mordgåta i slutet sällskap",
+        "Gåtfull mördare",
         "Seriemördare med gåtor/mönster",
+        "Katt och råtta",
+        "Oskyldigt anklagad",
       ].includes(chip)
     ) {
       addRule("crime_mystery", "Krim / Mysterium", [80, 9648]);
-    } else if (chip === "Heist & Kupplan" || chip === "Heist / Kupplan") {
+    } else if (
+      chip === "Verkliga brott" ||
+      chip === "True Crime (Verklighetsbaserat)"
+    ) {
+      addRule("true_crime", "Dokumentär / True Crime", [99]);
+    } else if (
+      chip === "Kupp & Heist" ||
+      chip === "Smart kupp" ||
+      chip === "Heist & Kupplan" ||
+      chip === "Heist / Kupplan" ||
+      chip === "Bluff" ||
+      chip === "Infiltration"
+    ) {
       addRule("heist", "Krim / Thriller / Action", [80, 53, 28, 10759]);
     }
 
-    // 6. Thriller & Spänning
+    // 6. Thriller & Spänning / Twist & Gåta / Hämnd & Överlevnad
     if (
       [
         "Thriller & Spänning",
+        "Psykologisk",
         "Psykologisk thriller",
+        "Seriemördare",
         "Kriminalthriller / Seriemördare",
         "Mysterie- & Pusselthriller",
+        "Överlevnad",
         "Överlevnadsthriller",
+        "Konspiration",
         "Konspirations- & Politisk thriller",
         "Spionthriller",
+        "Gisslandrama",
         "Gisslan & Belägring",
         "Hämndthriller",
+        "Hackers",
         "Tekno- / Cyberthriller",
+        "Katastrof",
         "Katastrofthriller",
       ].includes(chip)
     ) {
       addRule("thriller", "Thriller / Mysterium", [53, 9648, 80]);
+    } else if (chip === "Mysterium") {
+      addRule("mystery", "Mysterium", [9648]);
+    } else if (
+      [
+        "Twist & Gåta",
+        "Oväntad twist",
+        "Opålitlig berättare",
+        "Dubbelliv",
+        "Dröm eller verklighet",
+        "Minnesförlust",
+        "Psykologiskt spel",
+        "Hemligt sällskap",
+      ].includes(chip)
+    ) {
+      addRule("twist_mystery", "Thriller / Mysterium", [53, 9648, 18, 878]);
+    } else if (
+      ["Hämnd & Skydd", "Hämnd", "Skydda någon", "Mörkt förflutet", "Egen rättvisa"].includes(chip)
+    ) {
+      addRule("revenge", "Action / Thriller / Krim", [28, 53, 80, 10759, 18]);
+    } else if (
+      ["Överlevnad & Hot", "Instängda", "Naturkatastrof", "Pandemi", "Räddningsuppdrag"].includes(chip)
+    ) {
+      addRule("survival", "Thriller / Äventyr", [53, 12, 28, 18, 878, 27]);
     }
 
     // 7. Skräck
@@ -742,69 +2098,119 @@ export function extractTmdbVerificationRules(preferences: EveningPreferences): {
       [
         "Skräck",
         "Psykologisk skräck",
+        "Spöken",
         "Övernaturligt & Spöken",
+        "Monster",
         "Monster & Varelser",
+        "Slasher",
         "Slasher & Maskerad mördare",
+        "Sekter",
         "Folk horror / Sekt & Kult",
-        "Kosmisk & Sci-Fi-skräck",
-        "Sci-Fi-skräck",
+        "Zombies",
         "Zombies & Smitta",
-        "Skräckkomedi",
+        "Handkamera",
         "Found footage",
+        "Vampyrer",
         "Gotisk skräck",
       ].includes(chip)
     ) {
       addRule("horror", "Skräck", [27]);
+    } else if (
+      chip === "Rymdskräck" ||
+      chip === "Kosmisk & Sci-Fi-skräck" ||
+      chip === "Sci-Fi-skräck"
+    ) {
+      addRule("horror", "Skräck", [27]);
+      addRule("scifi", "Sci-Fi", [878, 10765]);
+    } else if (chip === "Skräckkomedi") {
+      addRule("horror", "Skräck", [27]);
+      addRule("comedy", "Komedi", [35]);
     }
 
     // 8. Drama
     if (
       [
         "Drama",
+        "Känslostarkt",
         "Känslostarkt & Gripande",
+        "Biografi",
         "Biografi & Verkliga livsöden",
+        "Karaktärsstudie",
         "Karaktärsstudie & Besatthet",
+        "Familjedrama",
+        "Relationsdrama",
         "Familje- & Relationsdrama",
+        "Kostymdrama",
         "Historiskt kostymdrama",
+        "Sportdrama",
         "Sport- & Underdog-drama",
         "Fängelsedrama",
-        "Musik- & Konstnärsdrama",
+        "Uppväxt",
         "Uppväxtskildring (Coming-of-age)",
       ].includes(chip)
     ) {
       addRule("drama", "Drama", [18]);
+    } else if (chip === "Musikdrama" || chip === "Musik- & Konstnärsdrama") {
+      addRule("drama", "Drama", [18]);
+      addRule("music", "Musik / Musikal", [10402]);
+    } else if (
+      [
+        "Karaktärer & Verklighet",
+        "Verklighetsbaserat",
+        "Rivalitet",
+        "Mästare och lärjunge",
+        "Underdog",
+      ].includes(chip)
+    ) {
+      addRule("character_drama", "Drama / Biografi", [18, 36, 99, 35]);
     }
 
     // 9. Romantik
     if (
       [
         "Romantik",
+        "Romantisk",
+        "Storslagen kärlek",
         "Episk & Ödesmättad kärlek",
+        "Rivaler blir kära",
         "Enemies to Lovers (Rivaler blir kära)",
         "Förbjuden kärlek",
+        "Olycklig kärlek",
         "Olycklig / Bitterljuv kärlek",
         "Historisk romans",
-        "Sci-Fi- / Tidsrese-romans",
         "Romantisk & Pirrig",
       ].includes(chip)
     ) {
       addRule("romance", "Romantik", [10749]);
+    } else if (
+      chip === "Sci-Fi-romans" ||
+      chip === "Sci-Fi- / Tidsrese-romans"
+    ) {
+      addRule("romance", "Romantik", [10749]);
+      addRule("scifi", "Sci-Fi", [878, 10765]);
     }
 
     // 10. Äventyr & Krig / Western
     if (
       [
         "Äventyr & Krig",
+        "Skattjakt",
         "Skattjakt & Arkeologi",
+        "Vildmark",
         "Överlevnad i vildmarken",
+        "Vikingar",
         "Vikingar & Nordisk myt",
+        "Gladiatorer",
         "Antiken & Gladiatorer",
+        "Pirater",
         "Pirater & Havsäventyr",
+        "Roadtrip",
         "Roadtrip & Resa",
       ].includes(chip)
     ) {
       addRule("adventure", "Äventyr", [12, 10759]);
     } else if (
+      chip === "Krigsfilm" ||
       chip === "Episkt krig & Fältslag" ||
       chip === "Andra världskriget"
     ) {
@@ -813,23 +2219,137 @@ export function extractTmdbVerificationRules(preferences: EveningPreferences): {
       addRule("western", "Western", [37]);
     }
 
-    // 11. Animerat
+    // 11. Animerat & Familj
     if (
       [
         "Animerat",
+        "Anime",
         "Anime / Japansk animation",
+        "Studio Ghibli",
         "Studio Ghibli-känsla",
+        "Pixar",
+        "Disney",
         "Pixar / DreamWorks-stil",
         "Vuxenanimation",
       ].includes(chip)
     ) {
       addRule("animation", "Animerat", [16]);
-    } else if (chip === "Animerad action & Sci-Fi") {
+    } else if (
+      chip === "Animerad action" ||
+      chip === "Animerad action & Sci-Fi"
+    ) {
       addRule("animation", "Animerat", [16]);
       addRule("action", "Action", [28, 10759]);
-      addRule("scifi", "Sci-Fi", [878, 10765]);
-    } else if (chip === "Familjefilm för alla åldrar") {
-      addRule("family", "Familj / Animerat", [10751, 10762, 16]);
+    } else if (
+      [
+        "Familj",
+        "Familjefilm",
+        "Familjefilm för alla åldrar",
+        "Barnfilm",
+        "Djur",
+        "Sagovärld",
+        "Julfilm",
+      ].includes(chip)
+    ) {
+      // Strictly require Family (10751) or Kids (10762) — NEVER allow adult Animation (16) alone!
+      addRule("family", "Familj", [10751, 10762]);
+    } else if (chip === "Familjeäventyr") {
+      addRule("family", "Familj", [10751, 10762]);
+      addRule("adventure", "Äventyr", [12, 10759]);
+    } else if (chip === "Familjekomedi") {
+      addRule("family", "Familj", [10751, 10762]);
+      addRule("comedy", "Komedi", [35]);
+    }
+
+    // 12. Dokumentär (strictly require genre 99 for all documentary subchips!)
+    if (
+      ["Dokumentär", "Natur", "Vetenskap", "Historia", "Sport", "Musik"].includes(
+        chip
+      )
+    ) {
+      addRule("documentary", "Dokumentär", [99]);
+    }
+
+    // 13. Superhjältar
+    if (
+      [
+        "Superhjältar",
+        "Marvel",
+        "DC",
+        "Antihjältar",
+        "Mörka hjältar",
+        "Superkrafter",
+        "Hjälteteam",
+      ].includes(chip)
+    ) {
+      addRule("superhero", "Action / Sci-Fi / Fantasy", [
+        28, 12, 878, 14, 10759, 10765,
+      ]);
+    }
+
+    // 14. Musikal (strictly require Music 10402 on movies; TV handled in verifyMovieAgainstTmdbCategories)
+    if (
+      [
+        "Musikal",
+        "Klassisk musikal",
+        "Konsert",
+        "Rock",
+        "Pop",
+        "Musikbiografi",
+        "Dansfilm",
+      ].includes(chip)
+    ) {
+      addRule("music", "Musik / Musikal", [10402]);
+    }
+
+    // 15. Makt & Politik
+    if (
+      [
+        "Makt & Politik",
+        "Maktspel",
+        "Politik",
+        "Korruption",
+        "Kungahus",
+        "Företagsdrama",
+        "Intriger",
+      ].includes(chip)
+    ) {
+      addRule("politics", "Drama / Politik", [18, 36, 10768, 53, 80]);
+    }
+
+    // 16. Vänskap & Relationer
+    if (
+      [
+        "Vänskap & Relationer",
+        "Vänskap",
+        "Familjekonflikt",
+        "Ny start",
+        "Skilsmässa",
+        "Föräldraskap",
+        "Grannar",
+      ].includes(chip)
+    ) {
+      addRule("relations", "Drama / Komedi", [18, 35, 10749, 10751]);
+    }
+
+    // 17. Historiska epoker (SETTING_GROUPS)
+    if (
+      [
+        "Forntid & Medeltid",
+        "Antiken",
+        "Vikingatid",
+        "Medeltid",
+        "1700-tal",
+        "1800-tal",
+      ].includes(chip)
+    ) {
+      addRule("history_era", "Historia / Epok", [36]);
+    } else if (
+      ["1900-tal & Western", "1920-tal", "1940-tal", "1970-tal", "1980-tal"].includes(
+        chip
+      )
+    ) {
+      addRule("modern_era", "Epok / Historia", [36, 18, 37]);
     }
   }
 
@@ -837,21 +2357,21 @@ export function extractTmdbVerificationRules(preferences: EveningPreferences): {
   let minYear: number | undefined;
   let maxYear: number | undefined;
   for (const fw of preferences.frameworks || []) {
-    if (fw === "2020-talet (Helt nytt)") {
+    if (fw === "2020-talet" || fw === "2020-talet (Helt nytt)") {
       minYear = Math.max(minYear ?? 0, 2020);
-    } else if (fw === "2010-talet (2010–2019)") {
+    } else if (fw === "2010-talet" || fw === "2010-talet (2010–2019)") {
       minYear = Math.max(minYear ?? 0, 2010);
       maxYear = Math.min(maxYear ?? 9999, 2019);
-    } else if (fw === "2000-talet (2000–2009)") {
+    } else if (fw === "2000-talet" || fw === "2000-talet (2000–2009)") {
       minYear = Math.max(minYear ?? 0, 2000);
       maxYear = Math.min(maxYear ?? 9999, 2009);
-    } else if (fw === "1990-talet (90-talsklassiker)") {
+    } else if (fw === "1990-talet" || fw === "1990-talet (90-talsklassiker)") {
       minYear = Math.max(minYear ?? 0, 1990);
       maxYear = Math.min(maxYear ?? 9999, 1999);
-    } else if (fw === "1980-talet (80-talsklassiker)") {
+    } else if (fw === "1980-talet" || fw === "1980-talet (80-talsklassiker)") {
       minYear = Math.max(minYear ?? 0, 1980);
       maxYear = Math.min(maxYear ?? 9999, 1989);
-    } else if (fw === "Äldre klassiker (före 1980)") {
+    } else if (fw === "Före 1980" || fw === "Äldre klassiker (före 1980)") {
       maxYear = Math.min(maxYear ?? 9999, 1979);
     } else if (fw === "Nyare än 2015") {
       minYear = Math.max(minYear ?? 0, 2015);
@@ -868,7 +2388,17 @@ export function extractTmdbVerificationRules(preferences: EveningPreferences): {
 }
 
 export function verifyMovieAgainstTmdbCategories(
-  movie: { tmdbGenreIds?: number[]; year?: string; runtime?: string },
+  movie: {
+    tmdbGenreIds?: number[];
+    year?: string;
+    runtime?: string;
+    runtimeMinutes?: number;
+    mediaType?: "movie" | "tv";
+    seasonCount?: number;
+    episodeRuntimeMinutes?: number;
+    tvStatus?: string;
+    originalLanguage?: string;
+  },
   preferences: EveningPreferences
 ): {
   verified: boolean;
@@ -878,53 +2408,129 @@ export function verifyMovieAgainstTmdbCategories(
 } {
   const { genreRules, minYear, maxYear } =
     extractTmdbVerificationRules(preferences);
+  const failResult = {
+    verified: false,
+    matchedRuleCount: 0,
+    totalRuleCount: genreRules.length + 1,
+    matchRatio: 0,
+  };
 
-  // Check TV series season count if a series length filter was chosen
+  // Check TV series length & format rules
   const moods = preferences.moods || [];
+  const frameworks = preferences.frameworks || [];
+  const hasSeriesRule = hasSeriesLengthFilter(preferences);
+
+  if (hasSeriesRule && movie.mediaType === "movie") {
+    return failResult;
+  }
+
   const rtLower = (movie.runtime || "").toLowerCase();
   const seasonMatch = rtLower.match(/(\d+)\s*säsong/);
-  const seasons = seasonMatch ? Number(seasonMatch[1]) : undefined;
+  const parsedSeasons = seasonMatch ? Number(seasonMatch[1]) : undefined;
+  const seasons =
+    typeof movie.seasonCount === "number" && movie.seasonCount > 0
+      ? movie.seasonCount
+      : parsedSeasons;
+
+  const wantsMini =
+    moods.includes("Miniserie") || moods.includes("Miniserie (1 kort säsong)");
+  const wants1to2 =
+    moods.includes("1–2 säsonger") ||
+    moods.includes("Kort serie (1–2 säsonger)");
+  const wants3to5 =
+    moods.includes("3–5 säsonger") ||
+    moods.includes("Mellanlång serie (3–5 säsonger)");
+  const wants6plus =
+    moods.includes("6+ säsonger") ||
+    moods.includes("Långkörare (6+ säsonger)");
+  const wantsShortEps = moods.includes("Korta avsnitt");
+  const wantsEnded =
+    moods.includes("Avslutad serie") ||
+    moods.includes("Avslutad serie (helt färdig)");
 
   if (seasons !== undefined && seasons > 0) {
-    if (
-      moods.includes("Miniserie (1 kort säsong)") &&
-      seasons > 1 &&
-      !rtLower.includes("miniserie")
-    ) {
-      return {
-        verified: false,
-        matchedRuleCount: 0,
-        totalRuleCount: genreRules.length + 1,
-        matchRatio: 0,
-      };
+    if (wantsMini && seasons !== 1) {
+      return failResult;
     }
-    if (moods.includes("Kort serie (1–2 säsonger)") && seasons > 2) {
-      return {
-        verified: false,
-        matchedRuleCount: 0,
-        totalRuleCount: genreRules.length + 1,
-        matchRatio: 0,
-      };
+    if (wants1to2 && (seasons < 1 || seasons > 2)) {
+      return failResult;
     }
-    if (
-      moods.includes("Mellanlång serie (3–5 säsonger)") &&
-      (seasons < 3 || seasons > 5)
-    ) {
-      return {
-        verified: false,
-        matchedRuleCount: 0,
-        totalRuleCount: genreRules.length + 1,
-        matchRatio: 0,
-      };
+    if (wants3to5 && (seasons < 3 || seasons > 5)) {
+      return failResult;
     }
-    if (moods.includes("Långkörare (6+ säsonger)") && seasons < 6) {
-      return {
-        verified: false,
-        matchedRuleCount: 0,
-        totalRuleCount: genreRules.length + 1,
-        matchRatio: 0,
-      };
+    if (wants6plus && seasons < 6) {
+      return failResult;
     }
+  }
+
+  if (
+    wantsShortEps &&
+    typeof movie.episodeRuntimeMinutes === "number" &&
+    movie.episodeRuntimeMinutes > 35
+  ) {
+    return failResult;
+  }
+
+  if (wantsEnded && movie.tvStatus) {
+    const statusLower = movie.tvStatus.toLowerCase();
+    if (statusLower !== "ended" && statusLower !== "canceled") {
+      return failResult;
+    }
+  }
+
+  // Check movie runtime rules (Max 90 min, Max 2 tim, Över 2 tim)
+  const runtimeMinutes =
+    typeof movie.runtimeMinutes === "number" && movie.runtimeMinutes > 0
+      ? movie.runtimeMinutes
+      : parseRuntimeMinutes(movie.runtime);
+  const wantsMax90 =
+    moods.includes("Max 90 min") || moods.includes("Max 90 minuter");
+  const wantsMax120 =
+    moods.includes("Max 2 tim") ||
+    moods.includes("Max 2 timmar") ||
+    frameworks.includes("Max 2 timmar");
+  const wantsOver120 =
+    moods.includes("Över 2 tim") ||
+    moods.includes("2+ timmar (Långfilm)") ||
+    frameworks.includes("2+ timmar (Långfilm)");
+
+  if (runtimeMinutes !== undefined && runtimeMinutes > 0) {
+    if (wantsMax90 && runtimeMinutes > 90) {
+      return failResult;
+    }
+    if (wantsMax120 && runtimeMinutes > 120) {
+      return failResult;
+    }
+    if (wantsOver120 && runtimeMinutes < 120) {
+      return failResult;
+    }
+  }
+
+  // Check Anime / Studio Ghibli Japanese language requirement when originalLanguage is known
+  const allSelected = [
+    ...(preferences.genres || []),
+    ...(preferences.contents || []),
+    ...(preferences.frameworks || []),
+    ...moods,
+  ];
+  const wantsAnime = allSelected.some((c) =>
+    [
+      "Anime",
+      "Anime / Japansk animation",
+      "Studio Ghibli",
+      "Studio Ghibli-känsla",
+    ].includes(c)
+  );
+  if (wantsAnime && movie.originalLanguage && movie.originalLanguage !== "ja") {
+    return failResult;
+  }
+
+  // Check Swedish language requirement when Sverige or Stockholm is explicitly chosen
+  const wantsSwedish = (preferences.frameworks || []).some((c) =>
+    ["Sverige", "Stockholm"].includes(c)
+  );
+  if (wantsSwedish && movie.originalLanguage && movie.originalLanguage !== "sv") {
+    return failResult;
   }
 
   // Check release year against TMDB year if era filter was chosen
@@ -932,20 +2538,10 @@ export function verifyMovieAgainstTmdbCategories(
     const yearNum = Number((movie.year || "").replace(/[^0-9]/g, "").slice(0, 4));
     if (yearNum > 1900) {
       if (minYear !== undefined && yearNum < minYear) {
-        return {
-          verified: false,
-          matchedRuleCount: 0,
-          totalRuleCount: genreRules.length + 1,
-          matchRatio: 0,
-        };
+        return failResult;
       }
       if (maxYear !== undefined && yearNum > maxYear) {
-        return {
-          verified: false,
-          matchedRuleCount: 0,
-          totalRuleCount: genreRules.length + 1,
-          matchRatio: 0,
-        };
+        return failResult;
       }
     }
   }
@@ -974,7 +2570,12 @@ export function verifyMovieAgainstTmdbCategories(
   let matchedRuleCount = 0;
 
   for (const rule of genreRules) {
-    if (rule.allowedGenreIds.some((gid) => idSet.has(gid))) {
+    // TMDB TV has no Music genre (10402); allow Drama/Comedy/Animation for TV musical shows
+    const effectiveIds =
+      rule.id === "music" && movie.mediaType === "tv"
+        ? [...rule.allowedGenreIds, 18, 35, 16]
+        : rule.allowedGenreIds;
+    if (effectiveIds.some((gid) => idSet.has(gid))) {
       matchedRuleCount++;
     }
   }
@@ -1000,24 +2601,37 @@ export function filterAndVerifyMoviesByTmdbCategories<
     tmdbGenreIds?: number[];
     year?: string;
     runtime?: string;
+    runtimeMinutes?: number;
+    mediaType?: "movie" | "tv";
+    seasonCount?: number;
+    episodeRuntimeMinutes?: number;
+    tvStatus?: string;
+    originalLanguage?: string;
     matchPercentage?: number;
   }
 >(movies: T[], preferences: EveningPreferences): T[] {
   const { genreRules, minYear, maxYear } =
     extractTmdbVerificationRules(preferences);
-  const hasSeriesLengthRule = (preferences.moods || []).some((m) =>
+  const hasSeriesLengthRule = hasSeriesLengthFilter(preferences);
+  const hasMovieRuntimeRule = hasMovieLengthFilter(preferences);
+  const wantsAnime = [
+    ...(preferences.genres || []),
+    ...(preferences.contents || []),
+  ].some((c) =>
     [
-      "Miniserie (1 kort säsong)",
-      "Kort serie (1–2 säsonger)",
-      "Mellanlång serie (3–5 säsonger)",
-      "Långkörare (6+ säsonger)",
-    ].includes(m)
+      "Anime",
+      "Anime / Japansk animation",
+      "Studio Ghibli",
+      "Studio Ghibli-känsla",
+    ].includes(c)
   );
   if (
     genreRules.length === 0 &&
     minYear === undefined &&
     maxYear === undefined &&
-    !hasSeriesLengthRule
+    !hasSeriesLengthRule &&
+    !hasMovieRuntimeRule &&
+    !wantsAnime
   ) {
     return movies;
   }
@@ -1080,16 +2694,16 @@ export const GENRE_GROUPS: readonly ExpandableChipGroup[] = [
     id: "action",
     label: "Action",
     subchips: [
-      "Action-romans",
-      "Action-komedi",
-      "Kampsport & Närkamp",
-      "Spion- & Agent-action",
-      "Heist & Kupplan",
-      "Hämnd-action (Vigilante)",
-      "Biljakter & Adrenalin",
-      "Militär & Specialstyrkor",
-      "Gun-fu / Lönnmördare",
-      "Over-the-top / Explosivt",
+      "Actionromans",
+      "Actionkomedi",
+      "Kampsport",
+      "Spioner",
+      "Kupp",
+      "Hämndaction",
+      "Biljakter",
+      "Militär",
+      "Lönnmördare",
+      "Explosivt",
       "Sci-Fi-action",
     ],
   },
@@ -1097,77 +2711,81 @@ export const GENRE_GROUPS: readonly ExpandableChipGroup[] = [
     id: "comedy",
     label: "Komedi",
     subchips: [
-      "Romantisk komedi (Rom-com)",
-      "Action-komedi",
-      "Mörk / Svart komedi",
-      "Buddy-komedi (Omaka par)",
+      "Romantisk komedi",
+      "Actionkomedi",
+      "Svart komedi",
+      "Omaka par",
       "Kriminalkomedi",
-      "Feelgood-komedi",
-      "Satir & Parodi",
-      "Urflippad / Slapstick",
-      "High school & Ungdom",
-      "Dramakomedi (Dramedy)",
+      "Feelgood",
+      "Parodi",
+      "Satir",
+      "Urflippad",
+      "Ungdomskomedi",
+      "Dramakomedi",
     ],
   },
   {
     id: "thriller",
     label: "Thriller & Spänning",
     subchips: [
-      "Psykologisk thriller",
-      "Kriminalthriller / Seriemördare",
-      "Mysterie- & Pusselthriller",
-      "Överlevnadsthriller",
-      "Konspirations- & Politisk thriller",
+      "Psykologisk",
+      "Seriemördare",
+      "Mysterium",
+      "Överlevnad",
+      "Konspiration",
       "Spionthriller",
-      "Gisslan & Belägring",
+      "Gisslandrama",
       "Hämndthriller",
-      "Tekno- / Cyberthriller",
-      "Katastrofthriller",
+      "Hackers",
+      "Katastrof",
     ],
   },
   {
     id: "scifi",
     label: "Sci-Fi",
     subchips: [
-      "Rymdäventyr & Främmande planeter",
-      "Tidsresor & Tidsloop",
-      "Cyberpunk & AI / Robotar",
-      "Dystopi & Postapokalyps",
-      "Utomjordingar / First Contact",
-      "Mind-bending Sci-Fi",
-      "Realistisk hård Sci-Fi",
+      "Rymdäventyr",
+      "Tidsresor",
+      "AI",
+      "Robotar",
+      "Dystopi",
+      "Postapokalyps",
+      "Utomjordingar",
+      "Klurig Sci-Fi",
+      "Realistisk Sci-Fi",
       "Sci-Fi-skräck",
-      "Genetik, Kloning & Experiment",
-      "Retro-futurism / Steampunk",
+      "Experiment",
+      "Retro-Sci-Fi",
     ],
   },
   {
     id: "fantasy",
     label: "Fantasy",
     subchips: [
-      "Episk High Fantasy (Alver & Drakar)",
-      "Mörk Fantasy & Monsterjakt",
-      "Svärd & Magi (Sword & Sorcery)",
-      "Mytologi & Folklore",
-      "Gotisk saga",
-      "Urban / Nutida Fantasy",
-      "Riddare & Medeltida riken",
-      "Portal till annan värld",
+      "Drakar",
+      "Mörk fantasy",
+      "Magi",
+      "Mytologi",
+      "Mörk saga",
+      "Nutida fantasy",
+      "Riddare",
+      "Annan värld",
     ],
   },
   {
     id: "crime",
     label: "Krim & Mysterium",
     subchips: [
-      "Pusseldeckare (Whodunnit)",
-      "Becksvart Neo-Noir",
-      "Maffia & Gangstervärld",
-      "Polisutredning & Detektiv",
+      "Mordgåta",
+      "Mörk deckare",
+      "Maffia",
+      "Polis",
+      "Detektiv",
       "Seriemördarjakt",
-      "Bankrån & Heist",
+      "Bankrån",
       "Rättssalsdrama",
-      "True Crime (Verklighetsbaserat)",
-      "Undercover & Infiltratör",
+      "Verkliga brott",
+      "Undercover",
     ],
   },
   {
@@ -1175,30 +2793,31 @@ export const GENRE_GROUPS: readonly ExpandableChipGroup[] = [
     label: "Skräck",
     subchips: [
       "Psykologisk skräck",
-      "Övernaturligt & Spöken",
-      "Monster & Varelser",
-      "Slasher & Maskerad mördare",
-      "Folk horror / Sekt & Kult",
-      "Kosmisk & Sci-Fi-skräck",
-      "Zombies & Smitta",
+      "Spöken",
+      "Monster",
+      "Slasher",
+      "Sekter",
+      "Rymdskräck",
+      "Zombies",
       "Skräckkomedi",
-      "Found footage",
-      "Gotisk skräck",
+      "Handkamera",
+      "Vampyrer",
     ],
   },
   {
     id: "drama",
     label: "Drama",
     subchips: [
-      "Känslostarkt & Gripande",
-      "Biografi & Verkliga livsöden",
-      "Karaktärsstudie & Besatthet",
-      "Familje- & Relationsdrama",
-      "Historiskt kostymdrama",
-      "Sport- & Underdog-drama",
+      "Känslostarkt",
+      "Biografi",
+      "Karaktärsstudie",
+      "Familjedrama",
+      "Relationsdrama",
+      "Kostymdrama",
+      "Sportdrama",
       "Fängelsedrama",
-      "Musik- & Konstnärsdrama",
-      "Uppväxtskildring (Coming-of-age)",
+      "Musikdrama",
+      "Uppväxt",
     ],
   },
   {
@@ -1206,40 +2825,89 @@ export const GENRE_GROUPS: readonly ExpandableChipGroup[] = [
     label: "Romantik",
     subchips: [
       "Romantisk komedi",
-      "Action-romans",
-      "Episk & Ödesmättad kärlek",
-      "Enemies to Lovers (Rivaler blir kära)",
+      "Actionromans",
+      "Storslagen kärlek",
+      "Rivaler blir kära",
       "Förbjuden kärlek",
-      "Olycklig / Bitterljuv kärlek",
+      "Olycklig kärlek",
       "Historisk romans",
-      "Sci-Fi- / Tidsrese-romans",
+      "Sci-Fi-romans",
     ],
   },
   {
     id: "adventure",
     label: "Äventyr & Krig",
     subchips: [
-      "Skattjakt & Arkeologi",
-      "Överlevnad i vildmarken",
-      "Episkt krig & Fältslag",
+      "Skattjakt",
+      "Vildmark",
+      "Krigsfilm",
       "Andra världskriget",
-      "Vikingar & Nordisk myt",
-      "Antiken & Gladiatorer",
-      "Pirater & Havsäventyr",
-      "Western / Vilda Västern",
-      "Roadtrip & Resa",
+      "Vikingar",
+      "Gladiatorer",
+      "Pirater",
+      "Vilda Västern",
+      "Roadtrip",
     ],
   },
   {
     id: "animation",
     label: "Animerat",
     subchips: [
-      "Anime / Japansk animation",
-      "Studio Ghibli-känsla",
-      "Pixar / DreamWorks-stil",
+      "Anime",
+      "Studio Ghibli",
+      "Pixar",
+      "Disney",
       "Vuxenanimation",
-      "Animerad action & Sci-Fi",
-      "Familjefilm för alla åldrar",
+      "Animerad action",
+      "Familjefilm",
+    ],
+  },
+  {
+    id: "documentary",
+    label: "Dokumentär",
+    subchips: [
+      "Natur",
+      "Verkliga brott",
+      "Historia",
+      "Sport",
+      "Musik",
+      "Vetenskap",
+    ],
+  },
+  {
+    id: "superhero",
+    label: "Superhjältar",
+    subchips: [
+      "Marvel",
+      "DC",
+      "Antihjältar",
+      "Mörka hjältar",
+      "Superkrafter",
+      "Hjälteteam",
+    ],
+  },
+  {
+    id: "family",
+    label: "Familj",
+    subchips: [
+      "Barnfilm",
+      "Familjeäventyr",
+      "Familjekomedi",
+      "Djur",
+      "Sagovärld",
+      "Julfilm",
+    ],
+  },
+  {
+    id: "musical",
+    label: "Musikal",
+    subchips: [
+      "Klassisk musikal",
+      "Dansfilm",
+      "Musikbiografi",
+      "Konsert",
+      "Rock",
+      "Pop",
     ],
   },
 ];
@@ -1249,56 +2917,56 @@ export const CONTENT_GROUPS: readonly ExpandableChipGroup[] = [
     id: "plot-twist",
     label: "Twist & Gåta",
     subchips: [
-      "Smart plot-twist",
-      "Ingenting är vad det verkar",
+      "Oväntad twist",
       "Opålitlig berättare",
-      "Dubbelliv & Hemlig identitet",
+      "Dubbelliv",
       "Dröm eller verklighet",
-      "Minnesförlust (Amnesi)",
-      "Psykologiskt rävspel",
+      "Minnesförlust",
+      "Psykologiskt spel",
     ],
   },
   {
     id: "crime-investigation",
     label: "Krim & Utredning",
     subchips: [
-      "Kriminalgåta / Däckare",
-      "Mordgåta i slutet sällskap",
-      "Katt-och-råtta-lek",
-      "Seriemördare med gåtor/mönster",
-      "Konspiration & Hemligheter",
-      "Oskyldigt anklagad på flykt",
+      "Deckargåta",
+      "Slutet sällskap",
+      "Katt och råtta",
+      "Gåtfull mördare",
+      "Konspiration",
+      "Oskyldigt anklagad",
     ],
   },
   {
     id: "heist-plan",
     label: "Kupp & Heist",
     subchips: [
-      "Heist / Kupplan",
-      "Bankrån & Kupp",
-      "Maffiauppgörelse",
-      "Infiltration & Bluff",
+      "Smart kupp",
+      "Bankrån",
+      "Maffiakrig",
+      "Bluff",
+      "Infiltration",
     ],
   },
   {
     id: "combat-action",
     label: "Strid & Action",
     subchips: [
-      "Svärdsstrider / Närkamp",
-      "Välkoreograferad action",
-      "En mot alla (One-man army)",
-      "Gladiator- / Turnering & Arena",
-      "Prisjägare / Yrkesmördare",
+      "Svärdsstrider",
+      "Närkamp",
+      "En mot alla",
+      "Turnering",
+      "Prisjägare",
     ],
   },
   {
     id: "revenge-justice",
     label: "Hämnd & Skydd",
     subchips: [
-      "Hämndberättelse",
-      "Skydda någon till varje pris",
-      "Uppgörelse med det förflutna",
-      "Rättvisa utanför lagen",
+      "Hämnd",
+      "Skydda någon",
+      "Mörkt förflutet",
+      "Egen rättvisa",
     ],
   },
   {
@@ -1306,19 +2974,19 @@ export const CONTENT_GROUPS: readonly ExpandableChipGroup[] = [
     label: "Överlevnad & Hot",
     subchips: [
       "Överlevnad",
-      "Instängda på isolerad plats",
-      "Människa mot naturkraft",
-      "Utbrott / Pandemi & Undergång",
-      "Räddningsuppdrag mot klockan",
+      "Instängda",
+      "Naturkatastrof",
+      "Pandemi",
+      "Räddningsuppdrag",
     ],
   },
   {
     id: "fantasy-creatures",
     label: "Monster & Fantasy",
     subchips: [
-      "Monster / Mörk fantasy",
-      "Utvald hjälte / Profetia",
-      "Magi & Uråldriga krafter",
+      "Monsterjakt",
+      "Utvald hjälte",
+      "Uråldrig magi",
       "Mytologiska väsen",
     ],
   },
@@ -1326,11 +2994,11 @@ export const CONTENT_GROUPS: readonly ExpandableChipGroup[] = [
     id: "lore-time",
     label: "Tidsresor & Sci-Fi",
     subchips: [
-      "Tidsresor / Tidsloop",
-      "Fast i samma dag (Tidsloop)",
-      "Parallella universum / Multiverse",
-      "AI / Robot med medvetande",
-      "Djup lore / Världsbygge",
+      "Tidsresor",
+      "Tidsloop",
+      "Parallella världar",
+      "Levande AI",
+      "Stort världsbygge",
     ],
   },
   {
@@ -1338,11 +3006,35 @@ export const CONTENT_GROUPS: readonly ExpandableChipGroup[] = [
     label: "Karaktärer & Verklighet",
     subchips: [
       "Verklighetsbaserat",
-      "Omaka par som tvingas samarbeta",
-      "Rivalitet & Besatthet",
-      "Mästare & Lärjunge",
-      "Underdog mot alla odds",
-      "Hemligt sällskap / Gille",
+      "Omaka par",
+      "Rivalitet",
+      "Mästare och lärjunge",
+      "Underdog",
+      "Hemligt sällskap",
+    ],
+  },
+  {
+    id: "power-politics",
+    label: "Makt & Politik",
+    subchips: [
+      "Maktspel",
+      "Politik",
+      "Korruption",
+      "Kungahus",
+      "Företagsdrama",
+      "Intriger",
+    ],
+  },
+  {
+    id: "friendship-relations",
+    label: "Vänskap & Relationer",
+    subchips: [
+      "Vänskap",
+      "Familjekonflikt",
+      "Ny start",
+      "Skilsmässa",
+      "Föräldraskap",
+      "Grannar",
     ],
   },
 ];
@@ -1352,53 +3044,83 @@ export const SETTING_GROUPS: readonly ExpandableChipGroup[] = [
     id: "space-future",
     label: "Rymd & Framtid",
     subchips: [
-      "Rymdskepp & Rymdstation",
+      "Rymdskepp",
       "Främmande planet",
-      "Cyberpunk-megastad",
-      "Postapokalyptisk ödemark",
-      "Nära framtid (High-tech)",
+      "Framtidsstad",
+      "Ödemark",
+      "Nära framtid",
     ],
   },
   {
     id: "isolated",
     label: "Isolerade platser",
     subchips: [
-      "Stormig ö / Öde ö",
-      "Isolerad stuga / Herrgård",
-      "Fängelse / Mentalsjukhus",
-      "Ubåt / Fartyg till havs",
-      "Tåg / Flygplan / Hotell",
-      "Underjordisk bunker / Grotta",
+      "Öde ö",
+      "Stuga",
+      "Herrgård",
+      "Fängelse",
+      "Fartyg",
+      "Ubåt",
+      "Tåg",
+      "Flygplan",
+      "Hotell",
+      "Bunker",
     ],
   },
   {
     id: "nature-wilderness",
     label: "Natur & Vildmark",
     subchips: [
-      "Skog, Berg & Vildmark",
-      "Snö, Is & Arktisk kyla",
-      "Öken & Hetta",
-      "Solig kust / Medelhavet",
+      "Skog",
+      "Berg",
+      "Vinter",
+      "Öken",
+      "Kust",
     ],
   },
   {
     id: "city-vibe",
     label: "Städer & Metropoler",
     subchips: [
-      "Regnig storstad på natten (Noir)",
-      "Småstad med mörka hemligheter",
-      "London / Brittisk miljö",
-      "New York / Amerikansk storstad",
-      "Tokyo / Asiatisk metropol",
+      "Storstad",
+      "Småstad",
+      "London",
+      "New York",
+      "Tokyo",
+    ],
+  },
+  {
+    id: "sweden-nordic",
+    label: "Sverige & Norden",
+    subchips: [
+      "Sverige",
+      "Norden",
+      "Europa",
+      "Stockholm",
+      "Landsbygd",
+    ],
+  },
+  {
+    id: "school-work",
+    label: "Skola & Jobb",
+    subchips: [
+      "Skola",
+      "Universitet",
+      "Sjukhus",
+      "Kontor",
+      "Restaurang",
+      "Advokatbyrå",
     ],
   },
   {
     id: "history-ancient-medieval",
     label: "Forntid & Medeltid",
     subchips: [
-      "Antiken (Rom / Grekland)",
-      "Vikingatid & Medeltid",
-      "1700- & 1800-tal (Gotiskt / Sekelskifte)",
+      "Antiken",
+      "Vikingatid",
+      "Medeltid",
+      "1700-tal",
+      "1800-tal",
     ],
   },
   {
@@ -1406,20 +3128,22 @@ export const SETTING_GROUPS: readonly ExpandableChipGroup[] = [
     label: "1900-tal & Western",
     subchips: [
       "Vilda Västern",
-      "1920–1940-tal (Noir & Världskrig)",
-      "1970- & 1980-talsmiljö",
+      "1920-tal",
+      "1940-tal",
+      "1970-tal",
+      "1980-tal",
     ],
   },
   {
     id: "release-decade",
     label: "Utgivningsår",
     subchips: [
-      "2020-talet (Helt nytt)",
-      "2010-talet (2010–2019)",
-      "2000-talet (2000–2009)",
-      "1990-talet (90-talsklassiker)",
-      "1980-talet (80-talsklassiker)",
-      "Äldre klassiker (före 1980)",
+      "2020-talet",
+      "2010-talet",
+      "2000-talet",
+      "1990-talet",
+      "1980-talet",
+      "Före 1980",
       "Nyare än 2015",
       "Klassiker",
     ],
@@ -1431,60 +3155,63 @@ export const MOOD_GROUPS: readonly ExpandableChipGroup[] = [
     id: "dark-tense",
     label: "Mörk & Nervkittlande",
     subchips: [
-      "Mörk & rå",
-      "Spännande på helspänn",
-      "Kuslig & Obehaglig",
-      "Klaustrofobisk & Tät",
-      "Becksvart & Kompromisslös",
-      "Adrenalin & Puls",
+      "Mörk",
+      "Rå",
+      "Nagelbitande",
+      "Kuslig",
+      "Klaustrofobisk",
+      "Hög puls",
     ],
   },
   {
     id: "mind-smart",
     label: "Smart & Psykologisk",
     subchips: [
-      "Mind-bending / Psykologisk",
-      "Mysterietät & Gåtfull",
-      "Filosofisk & Tankeväckande",
+      "Klurig",
+      "Gåtfull",
+      "Tankeväckande",
       "Oförutsägbar",
-      "Drömsk & Surrealistisk",
+      "Drömsk",
     ],
   },
   {
     id: "warm-feelgood",
     label: "Feelgood & Mys",
     subchips: [
-      "Mysig & stämningfull",
-      "Feelgood & Varm",
+      "Mysig",
+      "Feelgood",
       "Lättsam",
       "Nostalgisk",
+      "Slökolla",
+      "Avkopplande",
     ],
   },
   {
     id: "humor-romance",
     label: "Humor & Romantik",
     subchips: [
-      "Skrattfest & Charmig",
-      "Romantisk & Pirrig",
-      "Rapp dialog & Kemi",
-      "Dråplig & Knasig",
+      "Rolig",
+      "Charmig",
+      "Romantisk",
+      "Skarp dialog",
+      "Knasig",
     ],
   },
   {
     id: "epic-grand",
     label: "Episk & Spektakulär",
     subchips: [
-      "Episk & storslagen",
-      "Visuellt mästerverk (Foto & Musik)",
-      "Inspirerande & Triumferande",
+      "Storslagen",
+      "Snyggt foto",
+      "Inspirerande",
     ],
   },
   {
     id: "emotional-moving",
     label: "Känslosam & Gripande",
     subchips: [
-      "Känslosam & Gripande",
-      "Melankolisk & Vacker",
+      "Gripande",
+      "Vemodig",
       "Hjärtekrossande",
       "Tårframkallande",
     ],
@@ -1493,11 +3220,11 @@ export const MOOD_GROUPS: readonly ExpandableChipGroup[] = [
     id: "pace-tempo",
     label: "Berättartempo",
     subchips: [
-      "Högt tempo direkt (ingen seg start)",
-      "Slow-burn (bygger spänning)",
-      "Intensivt & Rastlöst",
-      "Meditativt & Lugnt",
-      "Kritikerrosat mästerverk",
+      "Högt tempo",
+      "Långsamt tempo",
+      "Intensivt",
+      "Lugnt",
+      "Mästerverk",
       "Dold pärla",
     ],
   },
@@ -1505,33 +3232,66 @@ export const MOOD_GROUPS: readonly ExpandableChipGroup[] = [
     id: "format-length",
     label: "Speltid & Längd",
     subchips: [
-      "Max 90 minuter",
-      "Max 2 timmar",
-      "2+ timmar (Långfilm)",
-      "Miniserie (1 kort säsong)",
-      "Kort serie (1–2 säsonger)",
-      "Mellanlång serie (3–5 säsonger)",
-      "Långkörare (6+ säsonger)",
-      "Korta avsnitt (ca 20–30 min)",
-      "Avslutad serie (helt färdig)",
+      "Max 90 min",
+      "Max 2 tim",
+      "Över 2 tim",
+      "Miniserie",
+      "1–2 säsonger",
+      "3–5 säsonger",
+      "6+ säsonger",
+      "Korta avsnitt",
+      "Avslutad serie",
     ],
   },
 ];
 
 export const MOVIE_LENGTH_SUBCHIPS: readonly string[] = [
-  "Max 90 minuter",
-  "Max 2 timmar",
-  "2+ timmar (Långfilm)",
+  "Max 90 min",
+  "Max 2 tim",
+  "Över 2 tim",
 ];
 
 export const TV_SERIES_LENGTH_SUBCHIPS: readonly string[] = [
-  "Miniserie (1 kort säsong)",
-  "Kort serie (1–2 säsonger)",
-  "Mellanlång serie (3–5 säsonger)",
-  "Långkörare (6+ säsonger)",
-  "Korta avsnitt (ca 20–30 min)",
-  "Avslutad serie (helt färdig)",
+  "Miniserie",
+  "1–2 säsonger",
+  "3–5 säsonger",
+  "6+ säsonger",
+  "Korta avsnitt",
+  "Avslutad serie",
 ];
+
+export function formatSelectedChipsWithContext(
+  chips: readonly string[] | undefined,
+  groups: readonly ExpandableChipGroup[]
+): string[] {
+  if (!Array.isArray(chips) || chips.length === 0) return [];
+  const chipSet = new Set(chips);
+  return chips.map((chip) => {
+    // If it's a main group label itself, keep as-is
+    if (groups.some((g) => g.label === chip)) return chip;
+    // Find parent groups containing this subchip
+    const parents = groups.filter((g) => g.subchips.includes(chip));
+    if (parents.length === 1) {
+      const parentLabel = parents[0].label;
+      // Avoid redundant parenthetical if parent is already selected or chip already contains parent word
+      if (
+        chipSet.has(parentLabel) ||
+        chip.toLowerCase().includes(parentLabel.toLowerCase())
+      ) {
+        return chip;
+      }
+      return `${chip} (${parentLabel})`;
+    }
+    if (parents.length > 1) {
+      const selectedParent = parents.find((p) => chipSet.has(p.label));
+      if (selectedParent) {
+        return chip;
+      }
+      return `${chip} (${parents.map((p) => p.label).join(" / ")})`;
+    }
+    return chip;
+  });
+}
 
 export function getMoodGroupsForMediaType(
   mediaType: "any" | "movie" | "tv" = "any"
@@ -2529,6 +4289,110 @@ export function normalizeMovieTitle(title?: string): string {
     .trim();
 }
 
+const CANONICAL_FRANCHISE_PATTERNS: Array<{ key: string; pattern: RegExp }> = [
+  { key: "harry potter", pattern: /\bharry potter\b/ },
+  {
+    key: "lord of the rings",
+    pattern:
+      /\b(lord of the rings|sagan om ringen|sagan om de tva tornen|sagan om konungens aterkomst|harskarringen)\b/,
+  },
+  { key: "star wars", pattern: /\b(star wars|stjarnornas krig)\b/ },
+  { key: "indiana jones", pattern: /\bindiana jones\b/ },
+  { key: "jurassic", pattern: /\bjurassic (park|world)\b/ },
+  { key: "batman", pattern: /\b(batman|the dark knight)\b/ },
+  { key: "bourne", pattern: /\bthe bourne\b|\bjason bourne\b/ },
+  { key: "fast furious", pattern: /\b(fast\s*(and|&)?\s*furious|fast x|the fast and the furious)\b/ },
+  { key: "28 days later", pattern: /\b28 (days|weeks|years) later\b/ },
+  { key: "hunger games", pattern: /\b(hunger games|hungerspelen)\b/ },
+  { key: "mission impossible", pattern: /\bmission impossible\b/ },
+  { key: "pirates of the caribbean", pattern: /\bpirates of the caribbean\b/ },
+  { key: "how to train your dragon", pattern: /\b(how to train your dragon|draktranaren)\b/ },
+  { key: "despicable me", pattern: /\b(despicable me|dumma mej|minions|minioner)\b/ },
+  { key: "kung fu panda", pattern: /\bkung fu panda\b/ },
+  { key: "shrek", pattern: /\bshrek\b/ },
+  { key: "spiderman", pattern: /\bspider\s*man\b/ },
+  { key: "avengers", pattern: /\bavengers\b/ },
+  { key: "john wick", pattern: /\bjohn wick\b/ },
+  { key: "godzilla", pattern: /\bgodzilla\b/ },
+  { key: "avatar", pattern: /^avatar(\b|$)/ },
+  { key: "a quiet place", pattern: /\ba quiet place\b/ },
+  { key: "toy story", pattern: /\btoy story\b/ },
+  { key: "the godfather", pattern: /\b(the godfather|gudfadern)\b/ },
+  { key: "frozen", pattern: /^(frozen|frost)(\s+\d+|\s*:|$)/ },
+  { key: "moana", pattern: /^(moana|vaiana)(\s+\d+|\s*:|$)/ },
+  { key: "terminator", pattern: /\bterminator\b/ },
+  { key: "dune", pattern: /^dune(\s*:|\s+part|\s+\d+|$)/ },
+  { key: "rocky", pattern: /^rocky(\s+[ivx]+|\s+\d+|\s*:|$)/ },
+  { key: "alien", pattern: /^aliens?(\s*:|\s+\d+|\s+vs|\s+romulus|\s+covenant|\s+resurrection|$)/ },
+  { key: "paddington", pattern: /^paddington(\b|$)/ },
+  { key: "hotel transylvania", pattern: /\b(hotel transylvania|hotell transylvanien)\b/ },
+  { key: "puss in boots", pattern: /\b(puss in boots|masterkatten)\b/ },
+  { key: "knives out", pattern: /\b(knives out|glass onion)\b/ },
+];
+
+function extractBaseFranchiseFromSingleTitle(raw?: string): string {
+  if (!raw || !raw.trim()) return "";
+
+  const normalizedFull = normalizeMovieTitle(raw);
+  if (!normalizedFull) return "";
+
+  for (const { key, pattern } of CANONICAL_FRANCHISE_PATTERNS) {
+    if (pattern.test(normalizedFull)) {
+      return key;
+    }
+  }
+
+  // Strip subtitle after colon or spaced dash when prefix is meaningful (>= 4 chars)
+  let base = raw.trim();
+  const sepMatch = base.match(/^(.{4,}?)(?:\s*:\s*|\s+[-–—]\s+).+$/);
+  if (sepMatch && sepMatch[1].trim().length >= 4) {
+    base = sepMatch[1].trim();
+  }
+
+  let norm = normalizeMovieTitle(base);
+  // Strip trailing sequel markers like "del 2", "del ii", "part two", "chapter 3", "vol 2"
+  norm = norm
+    .replace(/\b(del|part|chapter|vol|volume)\s+(one|two|three|four|five|six|i|ii|iii|iv|v|vi|\d+)\b$/i, "")
+    .trim();
+  // Strip trailing small sequel numbers (2-9) or Roman numerals (ii-vi) when base has >= 3 chars
+  const withoutTrailingNum = norm.replace(/\s+(?:[2-9]|ii|iii|iv|v|vi)$/i, "").trim();
+  if (withoutTrailingNum.length >= 3) {
+    norm = withoutTrailingNum;
+  }
+
+  return norm || normalizedFull;
+}
+
+export function getMovieFranchiseKey(title?: string, originalTitle?: string): string {
+  const fromOrig = extractBaseFranchiseFromSingleTitle(originalTitle);
+  const fromTitle = extractBaseFranchiseFromSingleTitle(title);
+
+  // If either matched a canonical franchise key, prefer that so Swedish & English titles map identically
+  for (const { key } of CANONICAL_FRANCHISE_PATTERNS) {
+    if (fromOrig === key || fromTitle === key) return key;
+  }
+
+  return fromOrig || fromTitle;
+}
+
+export function limitOnePerFranchise<
+  T extends { title: string; originalTitle?: string; isExactPinpointMatch?: boolean }
+>(list: T[]): T[] {
+  const seenFranchises = new Set<string>();
+  const result: T[] = [];
+  for (const item of list) {
+    if (item.isExactPinpointMatch) {
+      result.push(item);
+      continue;
+    }
+    const fKey = getMovieFranchiseKey(item.title, item.originalTitle);
+    if (fKey && seenFranchises.has(fKey)) continue;
+    if (fKey) seenFranchises.add(fKey);
+    result.push(item);
+  }
+  return result;
+}
+
 export function lookupCuratedTmdbMovie(
   title: string,
   year?: string
@@ -2542,6 +4406,9 @@ export function lookupCuratedTmdbMovie(
   if (exact) {
     return {
       ...exact,
+      ageRating:
+        normalizeSwedishAgeRating(exact.ageRating) ||
+        inferAgeRatingFromGenres(exact.tmdbGenreIds),
       seasonCount:
         exact.seasonCount ||
         (exact.mediaType === "tv" ? getSeriesSeasonCount(exact.title) : undefined),
@@ -2556,6 +4423,9 @@ export function lookupCuratedTmdbMovie(
   if (partial) {
     return {
       ...partial,
+      ageRating:
+        normalizeSwedishAgeRating(partial.ageRating) ||
+        inferAgeRatingFromGenres(partial.tmdbGenreIds),
       seasonCount:
         partial.seasonCount ||
         (partial.mediaType === "tv"
@@ -2583,6 +4453,7 @@ export function lookupCuratedTmdbMovie(
     seasonCount: knownSeasonCount,
     voteAverage: Math.round(voteAverage * 10) / 10,
     swedishProviders: { type: "none", providers: [] },
+    ageRating: "11+",
   };
 }
 
@@ -3040,27 +4911,36 @@ export function buildRecommendationSystemPrompt(
 
   const tvLengthRules: string[] = [];
   for (const m of preferences.moods || []) {
-    if (m === "Miniserie (1 kort säsong)") {
+    if (m === "Miniserie" || m === "Miniserie (1 kort säsong)") {
       tvLengthRules.push(
         `- MINISERIE (100% HÅRT KRAV): Rekommendera ENDAST miniserier / begränsade serier med exakt 1 säsong (ca 3–10 avsnitt totalt, t.ex. Chernobyl, Band of Brothers, Mare of Easttown, The Queen's Gambit). Föreslå ALDRIG serier med flera säsonger!`
       );
-    } else if (m === "Kort serie (1–2 säsonger)") {
+    } else if (m === "1–2 säsonger" || m === "Kort serie (1–2 säsonger)") {
       tvLengthRules.push(
         `- KORT SERIE (100% HÅRT KRAV): Rekommendera ENDAST serier som har max 1 eller 2 säsonger (t.ex. Mindhunter, Severance, Shōgun, Arcane, Andor). Föreslå ALDRIG långa serier med 3+ säsonger!`
       );
-    } else if (m === "Mellanlång serie (3–5 säsonger)") {
+    } else if (
+      m === "3–5 säsonger" ||
+      m === "Mellanlång serie (3–5 säsonger)"
+    ) {
       tvLengthRules.push(
         `- MELLANLÅNG SERIE (100% HÅRT KRAV): Rekommendera ENDAST serier som har 3 till 5 säsonger (t.ex. Dark 3 säsonger, Succession 4 säsonger, Breaking Bad 5 säsonger, The Boys, Stranger Things).`
       );
-    } else if (m === "Långkörare (6+ säsonger)") {
+    } else if (m === "6+ säsonger" || m === "Långkörare (6+ säsonger)") {
       tvLengthRules.push(
         `- LÅNGKÖRARE (100% HÅRT KRAV): Rekommendera ENDAST långa serier med minst 6 säsonger att sträckkolla (t.ex. Game of Thrones 8 säsonger, The Sopranos 6 säsonger, Better Call Saul 6 säsonger, Peaky Blinders 6 säsonger, Dexter 8 säsonger, The Shield 7 säsonger, Mad Men 7 säsonger, Suits 9 säsonger, The Office 9 säsonger). Föreslå ALDRIG miniserier eller korta serier på 1–3 säsonger!`
       );
-    } else if (m === "Korta avsnitt (ca 20–30 min)") {
+    } else if (
+      m === "Korta avsnitt" ||
+      m === "Korta avsnitt (ca 20–30 min)"
+    ) {
       tvLengthRules.push(
         `- KORTA AVSNITT (100% HÅRT KRAV): Rekommendera ENDAST serier där avsnitten är ca 20–35 minuter långa (t.ex. The Bear, Barry, Fleabag, The Office, Silicon Valley).`
       );
-    } else if (m === "Avslutad serie (helt färdig)") {
+    } else if (
+      m === "Avslutad serie" ||
+      m === "Avslutad serie (helt färdig)"
+    ) {
       tvLengthRules.push(
         `- AVSLUTAD SERIE (100% HÅRT KRAV): Rekommendera ENDAST serier som är helt färdigsända och avslutade (inga pågående eller oavslutade serier).`
       );
@@ -3084,9 +4964,45 @@ export function buildRecommendationSystemPrompt(
      tvLengthRules.length > 0 ? `\n${tvLengthRules.join("\n")}` : ""
    }`;
 
+  const steering = preferences.steering;
+  const steeringPromptLines = buildSteeringPromptLines(steering);
+  const steeringInstruction =
+    steering && steering.anchorMovie?.title
+      ? `
+STYRNING & VIDARESÖKNING UTIFRÅN VALD FILM (HÖGSTA PRIORITET – FÖLJ EXAKT!):
+- Användaren valde "${steering.anchorMovie.title}"${
+          steering.anchorMovie.year ? ` (${steering.anchorMovie.year})` : ""
+        }${
+          steering.anchorMovie.runtime ? `, speltid: ${steering.anchorMovie.runtime}` : ""
+        }${
+          steering.anchorMovie.originalTitle &&
+          steering.anchorMovie.originalTitle !== steering.anchorMovie.title
+            ? ` [Originaltitel: ${steering.anchorMovie.originalTitle}]`
+            : ""
+        } som en titel som är "åt rätt håll" ikväll!${
+          steering.anchorMovie.tmdbGenres && steering.anchorMovie.tmdbGenres.length > 0
+            ? `\n- Referensfilmens genrer: ${steering.anchorMovie.tmdbGenres.join(", ")}`
+            : ""
+        }${
+          steering.anchorMovie.vibeTags && steering.anchorMovie.vibeTags.length > 0
+            ? `\n- Referensfilmens vibe: ${steering.anchorMovie.vibeTags.join(", ")}`
+            : ""
+        }
+- DIN UPPGIFT: Utgå från kärnkänslan, kvaliteten och dragningskraften i "${steering.anchorMovie.title}", men STYR samtliga 5 nya förslag i exakt den riktning användaren ställt in med reglagen och snabbjusteringarna:
+${
+  steeringPromptLines.length > 0
+    ? steeringPromptLines.map((line) => `  * ${line}`).join("\n")
+    : "  * Behåll i stort sett samma känsla, tempo och ton som i referensfilmen, men ge 5 helt nya och lika träffsäkra alternativ."
+}
+- Föreslå ALDRIG "${steering.anchorMovie.title}" själv igen.
+- VIKTIGT FÖR MOTIVERINGEN ("whyYouWillLikeIt"): Förklara tydligt och konkret hur varje ny film/serie bygger vidare på "${steering.anchorMovie.title}" och på vilket sätt den uppfyller styrningen och eventuella snabbjusteringar.
+`
+      : "";
+
   return `Du är CineMinde – en elitskribent och expert på både film och TV-serier på svenska. Din uppgift är att rekommendera exakt 5 skräddarsydda titlar för ikväll som en JSON-array.
 
 ${mediaInstruction}
+${steeringInstruction}
 
 TVÅSTEGS-PRINCIPEN – HUR KVÄLLENS VAL OCH SMAKPROFILEN SAMSPELAR:
 1. STEG 1 – KVÄLLENS VALDA KATEGORIER ÄR EN HÅRD RAM (100% KRAV):
@@ -3131,10 +5047,10 @@ TOTALFÖRBUD: Du får ALDRIG rekommendera någon av dessa titlar igen! Föreslå
 
 KVÄLLENS VALDA KATEGORIER & UNDERKATEGORIER ("IKVÄLL" – HÅRD RAM):
 - Format (Film / Serie): ${mediaPref === "movie" ? "Endast Långfilm" : mediaPref === "tv" ? "Endast TV-serie / Miniserie" : "Både Film & Serie (välj det som passar kategorierna absolut bäst)"}
-- Genrer & Undergenrer: ${(preferences.genres || []).length > 0 ? (preferences.genres || []).join(", ") : "Valfri"}
-- Handling & Troper: ${preferences.contents.length > 0 ? preferences.contents.join(", ") : "Valfri"}
-- Miljö, Plats & Tidsålder: ${preferences.frameworks.length > 0 ? preferences.frameworks.join(", ") : "Valfri"}
-- Stämning, Vibe & Tempo: ${preferences.moods.length > 0 ? preferences.moods.join(", ") : "Valfri"}
+- Genrer & Undergenrer: ${(preferences.genres || []).length > 0 ? formatSelectedChipsWithContext(preferences.genres, GENRE_GROUPS).join(", ") : "Valfri"}
+- Handling & Troper: ${preferences.contents.length > 0 ? formatSelectedChipsWithContext(preferences.contents, CONTENT_GROUPS).join(", ") : "Valfri"}
+- Miljö, Plats & Tidsålder: ${preferences.frameworks.length > 0 ? formatSelectedChipsWithContext(preferences.frameworks, SETTING_GROUPS).join(", ") : "Valfri"}
+- Stämning, Vibe & Tempo: ${preferences.moods.length > 0 ? formatSelectedChipsWithContext(preferences.moods, MOOD_GROUPS).join(", ") : "Valfri"}
 - Valda streamingtjänster i Sverige (100% HÅRT KRAV OM ANGIVET): ${
     (preferences.streamingProviders || []).length > 0
       ? `ENDAST TITLAR PÅ ${(preferences.streamingProviders || []).join(", ")}! Varje rekommenderad film/serie MÅSTE finnas tillgänglig i Sverige på minst en av dessa valda tjänster (${(preferences.streamingProviders || []).join(", ")}). Du får INTE föreslå titlar som enbart finns på andra tjänster (t.ex. om användaren bara har valt Netflix får du absolut inte föreslå en titel som bara finns på HBO Max eller Disney+). Om en titel finns på den valda tjänsten OCH samtidigt på andra tjänster (t.ex. både Netflix och Apple TV / Viaplay) är den helt tillåten.`
@@ -3166,6 +5082,7 @@ Exempel på exakt fältstruktur för varje objekt i JSON-arrayen:
     "year": "2019",
     "runtime": "2 tim 10 min (eller '1 säsong · 5 avsnitt' för serier)",
     "mediaType": "movie",
+    "ageRating": "15+ (svensk åldersgräns: 'Btl', '7+', '11+' eller '15+')",
     "matchPercentage": 96,
     "whyYouWillLikeIt": "2–3 meningar på svenska som direkt förklarar BÅDE hur filmen/serien uppfyller kvällens valda kategorier OCH varför just denna titel inom kategorin passar användarens specifika smakprofil och tidigare sedda titlar.",
     "vibeTags": ["Tagg 1", "Tagg 2", "Tagg 3"],
@@ -3861,8 +5778,12 @@ export function generateSmartFallbackRecommendations(
         .toLowerCase()
         .replace(/[^a-zåäö0-9\s]/gi, " ")
         .split(/\s+/)
-        .filter((w) => w.length >= 4 && !["eller", "under", "kring", "film"].includes(w));
-      return words.some((w) => entrySearchText.includes(w.slice(0, 5)));
+        .filter((w) => w.length >= 2 && !["eller", "under", "kring", "film", "och", "med", "som"].includes(w));
+      return words.some((w) =>
+        w.length <= 3
+          ? new RegExp(`\\b${w}\\b`, "i").test(entrySearchText)
+          : entrySearchText.includes(w.slice(0, 5))
+      );
     };
 
     let matchedGenreCount = 0;
@@ -3914,13 +5835,24 @@ export function generateSmartFallbackRecommendations(
     }
 
     if (
-      preferences.frameworks.includes("Max 2 timmar") &&
+      (preferences.moods.includes("Max 90 min") ||
+        preferences.moods.includes("Max 90 minuter")) &&
+      entry.runtimeMinutes <= 95
+    ) {
+      score += 4;
+    }
+    if (
+      (preferences.moods.includes("Max 2 tim") ||
+        preferences.moods.includes("Max 2 timmar") ||
+        preferences.frameworks.includes("Max 2 timmar")) &&
       entry.runtimeMinutes <= 120
     ) {
       score += 4;
     }
     if (
-      preferences.frameworks.includes("2+ timmar (Långfilm)") &&
+      (preferences.moods.includes("Över 2 tim") ||
+        preferences.moods.includes("2+ timmar (Långfilm)") ||
+        preferences.frameworks.includes("2+ timmar (Långfilm)")) &&
       entry.runtimeMinutes >= 120
     ) {
       score += 4;
@@ -4006,6 +5938,8 @@ export function generateSmartFallbackRecommendations(
       swedishProviders: tmdbMeta.swedishProviders,
       tmdbGenreIds: tmdbMeta.tmdbGenreIds,
       tmdbGenres: tmdbMeta.tmdbGenres,
+      ageRating:
+        tmdbMeta.ageRating || inferAgeRatingFromGenres(tmdbMeta.tmdbGenreIds),
     };
   });
 

@@ -21,8 +21,14 @@ import {
   WatchedMovie,
   getTmdbPosterUrl,
   normalizeMovieTitle,
+  lookupCuratedTmdbMovie,
+  inferAgeRatingFromGenres,
 } from "../utils/movieLogic";
-import { MoviePoster, SwedishStreamingSection } from "./MovieVisuals";
+import {
+  MoviePoster,
+  SwedishStreamingSection,
+  AgeRatingBadge,
+} from "./MovieVisuals";
 
 interface RecommendedTabProps {
   watchedMovies: WatchedMovie[];
@@ -42,7 +48,20 @@ function loadStoredDeck(): MovieRecommendation[] {
     const raw = localStorage.getItem(STORAGE_KEY_DECK);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed)
+      ? parsed.map((card: MovieRecommendation) => {
+          if (card.ageRating) return card;
+          const meta = lookupCuratedTmdbMovie(
+            card.originalTitle || card.title,
+            card.year
+          );
+          return {
+            ...card,
+            ageRating:
+              meta.ageRating || inferAgeRatingFromGenres(card.tmdbGenreIds),
+          };
+        })
+      : [];
   } catch {
     return [];
   }
@@ -635,11 +654,20 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
                       </span>
                     )}
                   </div>
-                  {currentCard.runtime && (
-                    <p className="text-[11px] text-zinc-400 mt-0.5 font-medium">
-                      {currentCard.runtime}
-                    </p>
-                  )}
+                  <div className="flex items-center gap-2 mt-1">
+                    {currentCard.runtime && (
+                      <p className="text-[11px] text-zinc-400 font-medium">
+                        {currentCard.runtime}
+                      </p>
+                    )}
+                    <AgeRatingBadge
+                      ageRating={
+                        currentCard.ageRating ||
+                        inferAgeRatingFromGenres(currentCard.tmdbGenreIds)
+                      }
+                      variant="overlay"
+                    />
+                  </div>
                 </div>
 
                 {/* Swedish Streaming Providers */}
@@ -919,6 +947,12 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
                                   )}
                                   {movie.mediaType === "tv" ? "Serie" : "Film"}
                                 </span>
+                                <AgeRatingBadge
+                                  ageRating={
+                                    movie.ageRating ||
+                                    inferAgeRatingFromGenres(movie.tmdbGenreIds)
+                                  }
+                                />
                                 {movie.tmdbRating && (
                                   <>
                                     <span>·</span>
@@ -1033,6 +1067,12 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
                               <span>
                                 {movie.mediaType === "tv" ? "Serie" : "Film"}
                               </span>
+                              <AgeRatingBadge
+                                  ageRating={
+                                    movie.ageRating ||
+                                    inferAgeRatingFromGenres(movie.tmdbGenreIds)
+                                  }
+                                />
                               <span>·</span>
                               <span className="text-emerald-400 font-medium">
                                 {movie.matchPercentage}% Match

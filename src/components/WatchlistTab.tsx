@@ -19,7 +19,11 @@ import {
   movieMatchesStreamingProviders,
   filterMoviesByStreamingServices,
 } from "../utils/movieLogic";
-import { MoviePoster, SwedishStreamingSection } from "./MovieVisuals";
+import {
+  MoviePoster,
+  SwedishStreamingSection,
+  AgeRatingBadge,
+} from "./MovieVisuals";
 
 interface WatchlistTabProps {
   watchlist: MovieRecommendation[];
@@ -130,6 +134,7 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({
       posterPath: hit.posterPath,
       tmdbRating: hit.voteAverage,
       swedishProviders: hit.swedishProviders,
+      ageRating: hit.ageRating,
     });
   };
 
@@ -167,6 +172,7 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({
       posterPath: meta.posterPath,
       tmdbRating: meta.voteAverage,
       swedishProviders: meta.swedishProviders,
+      ageRating: meta.ageRating,
     });
   };
 
@@ -286,6 +292,7 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({
                         <span className="px-1.5 py-0.2 rounded bg-white/[0.06] text-[10px] font-medium text-zinc-300">
                           {hit.mediaType === "tv" ? "TV-serie" : "Film"}
                         </span>
+                        <AgeRatingBadge ageRating={hit.ageRating} />
                         <span>{hit.year}</span>
                         {typeof hit.voteAverage === "number" &&
                           hit.voteAverage > 0 && (
@@ -471,6 +478,15 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({
                             <span>{movie.runtime}</span>
                           </>
                         )}
+                        <AgeRatingBadge
+                          ageRating={
+                            movie.ageRating ||
+                            lookupCuratedTmdbMovie(
+                              movie.originalTitle || movie.title,
+                              movie.year
+                            ).ageRating
+                          }
+                        />
                         {typeof movie.tmdbRating === "number" &&
                           movie.tmdbRating > 0 && (
                             <>
