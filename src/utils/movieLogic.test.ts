@@ -17,6 +17,7 @@ import {
   searchCuratedTmdbMovies,
   filterMoviesByStreamingServices,
   filterAndVerifyMoviesByTmdbCategories,
+  limitAnimatedRecommendations,
   verifyMovieAgainstTmdbCategories,
   lookupCuratedTmdbMovie,
   isMovieMatchingDislikedCategories,
@@ -43,6 +44,13 @@ import {
   parseTmdbMovieAgeRating,
   parseTmdbTvAgeRating,
   inferAgeRatingFromGenres,
+  selectFavoriteSeedsForTmdb,
+  buildHybridCandidatePool,
+  formatCandidatePoolForPrompt,
+  resolveRecommendationTemperature,
+  getTasteCalibrationDeck,
+  buildWatchedMovieFromCalibration,
+  buildDismissedMovieFromCalibration,
 } from "./movieLogic";
 
 test("normalizeMovieTitle normalizes casing, accents, and punctuation", () => {
@@ -1589,7 +1597,7 @@ test("Franchise deduplication (max 1 per series) and London location keyword wit
   );
 });
 
-test("Superhjältar + Serie enforces strict keywords, excludes Kids (10762), and fallback returns superhero series", () => {
+test("Superhjältar + Serie enforces strict keywords, excludes Kids (10762), and caps animation to max 1 unless Animerat is selected", () => {
   const filters = extractTmdbDiscoverFilters({
     moods: [],
     genres: ["Superhjältar"],
@@ -1601,6 +1609,33 @@ test("Superhjältar + Serie enforces strict keywords, excludes Kids (10762), and
   assert.equal(filters.strictKeywords, true);
   assert.ok(filters.keywordGroups.some((g) => g.includes(9715)));
   assert.ok(filters.withoutGenreIds.includes(10762));
+  assert.equal(filters.withoutGenreIds.includes(16), false);
+
+  // Without Animerat selected: at most 1 animated title is kept alongside live-action titles
+  const mixedList = [
+    { title: "The Boys", tmdbGenreIds: [10759, 10765] },
+    { title: "Invincible", tmdbGenreIds: [16, 10759, 10765] },
+    { title: "One-Punch Man", tmdbGenreIds: [16, 35, 10759] },
+    { title: "Daredevil", tmdbGenreIds: [10759, 80, 18] },
+    { title: "My Hero Academia", tmdbGenreIds: [16, 10759] },
+  ];
+  const capped = limitAnimatedRecommendations(
+    mixedList,
+    { moods: [], genres: ["Superhjältar"], contents: [], frameworks: [], customText: "", mediaType: "tv" },
+    1
+  );
+  assert.deepEqual(
+    capped.map((m) => m.title),
+    ["The Boys", "Invincible", "Daredevil"]
+  );
+
+  // With Animerat selected: no animation cap is applied
+  const uncapped = limitAnimatedRecommendations(
+    mixedList,
+    { moods: [], genres: ["Superhjältar", "Animerat"], contents: [], frameworks: [], customText: "", mediaType: "tv" },
+    1
+  );
+  assert.equal(uncapped.length, 5);
 
   const fallbacks = generateSmartFallbackRecommendations(
     [],
@@ -1615,9 +1650,572 @@ test("Superhjältar + Serie enforces strict keywords, excludes Kids (10762), and
     }
   );
   assert.equal(fallbacks.length, 5);
-  const titles = fallbacks.map((r) => r.title);
-  assert.ok(titles.includes("The Boys"));
-  assert.ok(titles.includes("Daredevil"));
-  assert.ok(titles.includes("Invincible"));
-  assert.ok(!titles.some((t) => t.toLowerCase().includes("witcher")));
+  const animatedCount = fallbacks.filter((r) => (r.tmdbGenreIds || []).includes(16)).length;
+  assert.ok(animatedCount <= 1);
+  assert.ok(!fallbacks.some((r) => r.title.toLowerCase().includes("witcher")));
+});
+
+test("selectFavoriteSeedsForTmdb prioritizes 5-star favorites, respects mediaType and franchise cap, and handles season ratings", () => {
+  const watched: WatchedMovie[] = [
+    {
+      id: "w1",
+      title: "Prisoners",
+      rating: 5,
+      liked: true,
+      mediaType: "movie",
+      tags: [],
+      addedAt: "2026-10-10",
+    },
+    {
+      id: "w2",
+      title: "Dune",
+      rating: 4,
+      liked: true,
+      mediaType: "movie",
+      tags: [],
+      addedAt: "2026-10-05",
+    },
+    {
+      id: "w3",
+      title: "Dune: Part Two",
+      rating: 5,
+      liked: true,
+      mediaType: "movie",
+      tags: [],
+      addedAt: "2026-10-12",
+    },
+    {
+      id: "w4",
+      title: "Bad Movie",
+      rating: 2,
+      liked: false,
+      mediaType: "movie",
+      tags: [],
+      addedAt: "2026-10-20",
+    },
+    {
+      id: "w5",
+      title: "True Detective",
+      rating: 3,
+      liked: true,
+      mediaType: "tv",
+      tags: [],
+      addedAt: "2026-10-15",
+      seasons: [
+        { seasonNumber: 1, rating: 5, liked: true, tags: [] },
+        { seasonNumber: 2, rating: 2, liked: false, tags: [] },
+      ],
+    },
+  ];
+
+  const movieSeeds = selectFavoriteSeedsForTmdb(watched, "movie", 5);
+  assert.deepEqual(
+    movieSeeds.map((m) => m.title),
+    ["Dune: Part Two", "Prisoners"]
+  );
+
+  const tvSeeds = selectFavoriteSeedsForTmdb(watched, "tv", 5);
+  assert.deepEqual(
+    tvSeeds.map((m) => m.title),
+    ["True Detective"]
+  );
+});
+
+test("buildHybridCandidatePool merges collaborative and discover hits, boosts overlap, and enforces streaming & disliked filters", () => {
+  const watched: WatchedMovie[] = [
+    {
+      id: "w1",
+      title: "Prisoners",
+      tmdbId: 146233,
+      rating: 5,
+      liked: true,
+      tags: [],
+      addedAt: "2026-10-10",
+    },
+  ];
+
+  const collaborative: MovieRecommendation[] = [
+    {
+      id: "c1",
+      title: "Sicario",
+      year: "2015",
+      runtime: "Film",
+      mediaType: "movie",
+      matchPercentage: 90,
+      whyYouWillLikeIt: "Collab",
+      vibeTags: ["Thriller"],
+      tmdbId: 273481,
+      tmdbRating: 7.4,
+      tmdbGenreIds: [28, 80, 53],
+      tmdbGenres: ["Action", "Kriminal", "Thriller"],
+      recommendedFromSeeds: ["Prisoners", "Zodiac"],
+    },
+    {
+      id: "c2",
+      title: "The Conjuring",
+      year: "2013",
+      runtime: "Film",
+      mediaType: "movie",
+      matchPercentage: 88,
+      whyYouWillLikeIt: "Horror collab",
+      vibeTags: ["Skräck"],
+      tmdbId: 138843,
+      tmdbRating: 7.5,
+      tmdbGenreIds: [27, 53],
+      tmdbGenres: ["Skräck", "Thriller"],
+      recommendedFromSeeds: ["Prisoners"],
+      swedishProviders: {
+        type: "flatrate",
+        providers: [{ provider_id: 8, provider_name: "Netflix" }],
+      },
+    },
+    {
+      id: "c3",
+      title: "Prisoners",
+      year: "2013",
+      runtime: "Film",
+      mediaType: "movie",
+      matchPercentage: 95,
+      whyYouWillLikeIt: "Already watched",
+      vibeTags: ["Thriller"],
+      tmdbId: 146233,
+      tmdbRating: 8.1,
+      tmdbGenreIds: [18, 53],
+      recommendedFromSeeds: ["Zodiac"],
+    },
+  ];
+
+  const discovered: MovieRecommendation[] = [
+    {
+      id: "d1",
+      title: "Sicario",
+      year: "2015",
+      runtime: "2 tim 1 min",
+      mediaType: "movie",
+      matchPercentage: 86,
+      whyYouWillLikeIt: "Discover",
+      vibeTags: ["Thriller"],
+      tmdbId: 273481,
+      tmdbRating: 7.4,
+      tmdbGenreIds: [28, 80, 53],
+      tmdbGenres: ["Action", "Kriminal", "Thriller"],
+      swedishProviders: {
+        type: "flatrate",
+        providers: [{ provider_id: 8, provider_name: "Netflix" }],
+      },
+    },
+    {
+      id: "d2",
+      title: "Nightcrawler",
+      year: "2014",
+      runtime: "1 tim 57 min",
+      mediaType: "movie",
+      matchPercentage: 87,
+      whyYouWillLikeIt: "Discover only",
+      vibeTags: ["Thriller"],
+      tmdbId: 242582,
+      tmdbRating: 7.7,
+      tmdbGenreIds: [80, 18, 53],
+      tmdbGenres: ["Kriminal", "Drama", "Thriller"],
+      swedishProviders: {
+        type: "flatrate",
+        providers: [{ provider_id: 8, provider_name: "Netflix" }],
+      },
+    },
+  ];
+
+  const pool = buildHybridCandidatePool({
+    collaborativeCandidates: collaborative,
+    discoveredCandidates: discovered,
+    watchedMovies: watched,
+    watchlist: [],
+    previousTitles: [],
+    dislikedCategories: ["Skräck"],
+    preferences: {
+      moods: [],
+      genres: ["Thriller"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      streamingProviders: ["Netflix"],
+      mediaType: "movie",
+    },
+  });
+
+  // Sicario should rank #1 because it matched BOTH collaborative seeds + Discover,
+  // preserving Netflix providers from Discover and seed hints from collaborative
+  assert.deepEqual(
+    pool.map((p) => p.title),
+    ["Sicario", "Nightcrawler"]
+  );
+  assert.deepEqual(pool[0].recommendedFromSeeds, ["Prisoners", "Zodiac"]);
+  assert.equal(pool[0].swedishProviders?.providers[0]?.provider_name, "Netflix");
+
+  const promptBlock = formatCandidatePoolForPrompt(pool, {
+    selectedServices: ["Netflix"],
+    hasSteering: false,
+    hasCustomText: false,
+  });
+  assert.ok(promptBlock.includes("Sicario"));
+  assert.ok(promptBlock.includes("Gillad av fans av Prisoners & Zodiac"));
+  assert.ok(promptBlock.includes("Bekräftad på Netflix"));
+});
+
+test("resolveRecommendationTemperature lowers temperature for strict/steered queries and raises it for open exploration", () => {
+  // Open taste-profile exploration ("För dig")
+  assert.equal(
+    resolveRecommendationTemperature({
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "",
+    }),
+    0.85
+  );
+
+  // Open exploration with streaming lock
+  assert.equal(
+    resolveRecommendationTemperature({
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      streamingProviders: ["Netflix"],
+    }),
+    0.75
+  );
+
+  // 2–3 simultaneous filter chips -> precise
+  assert.equal(
+    resolveRecommendationTemperature({
+      moods: ["Mörk & rå"],
+      genres: ["Thriller"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+    }),
+    0.6
+  );
+
+  // Steering or custom free-text -> strictest precision
+  assert.equal(
+    resolveRecommendationTemperature({
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "En rymdfilm som Interstellar men kortare",
+    }),
+    0.5
+  );
+  assert.equal(
+    resolveRecommendationTemperature({
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      steering: {
+        anchorMovie: { title: "Prisoners" },
+        sliders: { mood: 0, pace: 1, depth: 0, tone: 0 },
+        quickTweaks: ["Kortare"],
+      },
+    }),
+    0.5
+  );
+});
+
+test("buildRecommendationSystemPrompt includes watchlist as positive taste signal and dismissedMovies as negative signal", () => {
+  const prompt = buildRecommendationSystemPrompt(
+    [],
+    [
+      {
+        id: "wl-1",
+        title: "Arrival",
+        year: "2016",
+        runtime: "1 tim 56 min",
+        matchPercentage: 95,
+        whyYouWillLikeIt: "Smart sci-fi",
+        vibeTags: ["Mind-bending", "Stämningsfull"],
+        tmdbGenres: ["Sci-Fi", "Drama"],
+      },
+    ],
+    "Gillar smart sci-fi.",
+    {
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "",
+    },
+    [],
+    [],
+    5,
+    [
+      {
+        title: "Older Dismissed",
+        tmdbGenres: ["Komedi"],
+        dismissedAt: "2026-10-01T10:00:00Z",
+      },
+      {
+        title: "Bridgerton",
+        tmdbGenres: ["Drama", "Romantik"],
+        vibeTags: ["Kostymdrama"],
+        dismissedAt: "2026-11-26T12:00:00Z",
+      },
+    ]
+  );
+
+  assert.ok(prompt.includes("ANVÄNDARENS WATCHLIST (POSITIV SMAKSIGNAL"));
+  assert.ok(prompt.includes('"Arrival" (2016) [Sci-Fi, Drama, Mind-bending, Stämningsfull]'));
+  assert.ok(prompt.includes("NYLIGEN BORTSWIPADE / RATADE FÖRSLAG (NEGATIV SMAKSIGNAL"));
+  assert.ok(prompt.includes('"Bridgerton" [Drama, Romantik, Kostymdrama]'));
+  assert.ok(prompt.indexOf("Bridgerton") < prompt.indexOf("Older Dismissed"));
+});
+
+test("buildRecommendationSystemPrompt separates movie and TV taste when both formats are logged", () => {
+  const watched: WatchedMovie[] = [
+    {
+      id: "m1",
+      title: "Prisoners",
+      mediaType: "movie",
+      rating: 5,
+      liked: true,
+      tags: ["Stämningen / Atmosfären"],
+      addedAt: "2026-10-01",
+    },
+    {
+      id: "m2",
+      title: "Fast X",
+      mediaType: "movie",
+      rating: 2,
+      liked: false,
+      tags: ["Action- & Stridsscenerna"],
+      addedAt: "2026-10-02",
+    },
+    {
+      id: "t1",
+      title: "Ted Lasso",
+      mediaType: "tv",
+      rating: 5,
+      liked: true,
+      tags: ["Karaktärerna & Skådespeleriet"],
+      addedAt: "2026-10-03",
+    },
+    {
+      id: "t2",
+      title: "The Walking Dead",
+      mediaType: "tv",
+      rating: 2,
+      liked: false,
+      tags: ["Spänningen & Tempot"],
+      addedAt: "2026-10-04",
+    },
+  ];
+
+  const tvPrompt = buildRecommendationSystemPrompt(
+    watched,
+    [],
+    "Mixad smak",
+    {
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "tv",
+    }
+  );
+  assert.ok(tvPrompt.includes("FAVORITFILMER (4–5 stjärnor"));
+  assert.ok(tvPrompt.includes("FAVORITSERIER & SÄSONGER (4–5 stjärnor"));
+  assert.ok(tvPrompt.includes("OGILLADE FILMER (1–2 stjärnor"));
+  assert.ok(tvPrompt.includes("OGILLADE SERIER & SÄSONGER (1–2 stjärnor"));
+  assert.ok(tvPrompt.includes("Användaren söker TV-SERIER nu."));
+
+  const moviePrompt = buildRecommendationSystemPrompt(
+    watched,
+    [],
+    "Mixad smak",
+    {
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "movie",
+    }
+  );
+  assert.ok(moviePrompt.includes("Användaren söker LÅNGFILMER nu."));
+});
+
+test("Taste calibration deck excludes already watched titles and builds valid WatchedMovie verdicts", () => {
+  const watched: WatchedMovie[] = [
+    {
+      id: "w1",
+      title: "Inception",
+      rating: 5,
+      liked: true,
+      tags: [],
+      addedAt: "2026-10-01",
+    },
+    {
+      id: "w2",
+      title: "Chernobyl",
+      mediaType: "tv",
+      rating: 5,
+      liked: true,
+      tags: [],
+      addedAt: "2026-10-02",
+    },
+  ];
+
+  const deck = getTasteCalibrationDeck(watched, 10);
+  assert.equal(deck.length, 10);
+  assert.ok(!deck.some((c) => c.title === "Inception"));
+  assert.ok(!deck.some((c) => c.title === "Chernobyl"));
+  // Contains both movies and TV series with TMDB metadata
+  assert.ok(deck.some((c) => c.mediaType === "movie"));
+  assert.ok(deck.some((c) => c.mediaType === "tv"));
+  assert.ok(deck.every((c) => typeof c.tmdbId === "number" && c.tmdbId > 0));
+
+  const loved = buildWatchedMovieFromCalibration(deck[0], "love");
+  assert.equal(loved.rating, 5);
+  assert.equal(loved.liked, true);
+  assert.ok(loved.tags.length > 0);
+
+  const disliked = buildWatchedMovieFromCalibration(deck[1], "dislike");
+  assert.equal(disliked.rating, 2);
+  assert.equal(disliked.liked, false);
+  assert.deepEqual(disliked.tags, []);
+
+  // Dismissed calibration titles are excluded without polluting watchedMovies
+  const dismissedEntry = buildDismissedMovieFromCalibration(deck[0]);
+  assert.equal(dismissedEntry.title, deck[0].title);
+  assert.ok(dismissedEntry.dismissedAt);
+  const deckAfterDismiss = getTasteCalibrationDeck(watched, 10, [dismissedEntry]);
+  assert.ok(!deckAfterDismiss.some((c) => c.title === deck[0].title));
+
+  // Calibration deck includes diverse genres (feel-good, comedy, horror, family, romance)
+  const fullFirstTen = getTasteCalibrationDeck([], 10).map((c) => c.title);
+  assert.ok(fullFirstTen.includes("En oväntad vänskap"));
+  assert.ok(fullFirstTen.includes("Ted Lasso"));
+  assert.ok(fullFirstTen.includes("Get Out"));
+  assert.ok(fullFirstTen.includes("Coco"));
+  assert.ok(fullFirstTen.includes("La La Land"));
+  assert.ok(fullFirstTen.includes("Superbad"));
+});
+
+test("limitAnimatedRecommendations respects animation-loving users in open taste mode", () => {
+  const candidates = [
+    { title: "Arcane", tmdbGenreIds: [16, 10765] },
+    { title: "Spider-Verse", tmdbGenreIds: [16, 28] },
+    { title: "Invincible", tmdbGenreIds: [16, 10759] },
+    { title: "The Boys", tmdbGenreIds: [10765, 10759] },
+  ];
+  const openPrefs = {
+    moods: [],
+    genres: [],
+    contents: [],
+    frameworks: [],
+    customText: "",
+  };
+  const animationFan: WatchedMovie[] = [
+    {
+      id: "anim1",
+      title: "Spirited Away",
+      rating: 5,
+      liked: true,
+      tags: [],
+      addedAt: "2026-10-01",
+      tmdbGenreIds: [16, 14],
+    },
+  ];
+  const liveActionOnly: WatchedMovie[] = [
+    {
+      id: "la1",
+      title: "Prisoners",
+      rating: 5,
+      liked: true,
+      tags: [],
+      addedAt: "2026-10-01",
+      tmdbGenreIds: [18, 53],
+    },
+  ];
+
+  // Animation fan in open "För dig" mode keeps all animated titles
+  assert.equal(
+    limitAnimatedRecommendations(candidates, openPrefs, 1, animationFan).length,
+    4
+  );
+  // Non-animation user still gets capped to max 1 animated title
+  assert.equal(
+    limitAnimatedRecommendations(candidates, openPrefs, 1, liveActionOnly).length,
+    2
+  );
+  // Even an animation fan gets capped when they explicitly pick a non-animation filter
+  assert.equal(
+    limitAnimatedRecommendations(
+      candidates,
+      { ...openPrefs, genres: ["Thriller"] },
+      1,
+      animationFan
+    ).length,
+    2
+  );
+});
+
+test("generateSmartFallbackRecommendations excludes dismissedMovies", () => {
+  const initial = generateSmartFallbackRecommendations(
+    [],
+    [],
+    { moods: [], genres: [], contents: [], frameworks: [], customText: "" },
+    []
+  );
+  assert.ok(initial.length > 0);
+  const dismissedTitle = initial[0].title;
+  const afterDismiss = generateSmartFallbackRecommendations(
+    [],
+    [],
+    { moods: [], genres: [], contents: [], frameworks: [], customText: "" },
+    [],
+    [],
+    [{ title: dismissedTitle, dismissedAt: "2026-11-26T00:00:00.000Z" }]
+  );
+  assert.ok(!afterDismiss.some((m) => m.title === dismissedTitle));
+});
+
+test("Thriller & Spänning rejects gentle Drama/Mystery movies while allowing TV mystery thrillers", () => {
+  const thrillerPrefs = {
+    moods: [],
+    genres: ["Thriller & Spänning"],
+    contents: [],
+    frameworks: [],
+    customText: "",
+  };
+  // Gentle Drama/Mystery movie (e.g. Remarkably Bright Creatures) should NOT match Thriller & Spänning
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { mediaType: "movie", tmdbGenreIds: [18, 9648] },
+      thrillerPrefs
+    ).verified,
+    false
+  );
+  // Real thriller movie (Thriller 53) passes
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { mediaType: "movie", tmdbGenreIds: [18, 53, 9648] },
+      thrillerPrefs
+    ).verified,
+    true
+  );
+  // TV thriller (TMDB TV has no 53 genre, uses 9648) still passes
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { mediaType: "tv", tmdbGenreIds: [18, 9648, 10765] },
+      thrillerPrefs
+    ).verified,
+    true
+  );
 });

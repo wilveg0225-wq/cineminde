@@ -159,6 +159,7 @@ interface TonightTabProps {
   onClearSteering?: () => void;
   onAddToWatchlist: (movie: MovieRecommendation) => void;
   onMarkAsWatched: (movie: MovieRecommendation) => void;
+  onDismissMovie?: (movie: MovieRecommendation) => void;
   watchlist: MovieRecommendation[];
   watchedMovies?: WatchedMovie[];
   watchedCount: number;
@@ -176,6 +177,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
   onClearSteering,
   onAddToWatchlist,
   onMarkAsWatched,
+  onDismissMovie,
   watchlist,
   watchedMovies = [],
   watchedCount,
@@ -1193,24 +1195,33 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                         </div>
                       )}
 
-                      {/* 3-4 vibe-taggar */}
-                      {rec.vibeTags && rec.vibeTags.length > 0 && (
-                        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-zinc-400 pt-0.5">
-                          {rec.vibeTags.map((tag, tIdx) => (
-                            <React.Fragment key={tag}>
-                              {tIdx > 0 && (
-                                <span
-                                  aria-hidden="true"
-                                  className="text-zinc-600"
-                                >
-                                  ·
-                                </span>
-                              )}
-                              <span className="text-zinc-300">{tag}</span>
-                            </React.Fragment>
-                          ))}
-                        </div>
-                      )}
+                      {/* 3-4 vibe-taggar (filtrera bort rena dubbletter av TMDB-genrer) */}
+                      {(() => {
+                        const tmdbGenreSet = new Set(
+                          (rec.tmdbGenres || []).map((g) => g.trim().toLowerCase())
+                        );
+                        const uniqueVibeTags = (rec.vibeTags || []).filter(
+                          (tag) => !tmdbGenreSet.has(tag.trim().toLowerCase())
+                        );
+                        if (uniqueVibeTags.length === 0) return null;
+                        return (
+                          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-zinc-400 pt-0.5">
+                            {uniqueVibeTags.map((tag, tIdx) => (
+                              <React.Fragment key={tag}>
+                                {tIdx > 0 && (
+                                  <span
+                                    aria-hidden="true"
+                                    className="text-zinc-600"
+                                  >
+                                    ·
+                                  </span>
+                                )}
+                                <span className="text-zinc-300">{tag}</span>
+                              </React.Fragment>
+                            ))}
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
 
@@ -1254,7 +1265,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                       ) : (
                         <>
                           <Plus className="w-4 h-4 text-[#f59e0b]" />
-                          <span>+ Watchlist</span>
+                          <span>Watchlist</span>
                         </>
                       )}
                     </button>
@@ -1270,33 +1281,50 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                     </button>
                   </div>
 
-                  {/* Styr vidare från denna film */}
-                  {onSteerFromMovie && (
+                  {/* Styr vidare från denna film & Inte intresserad */}
+                  {(onSteerFromMovie || onDismissMovie) && (
                     <div className="pt-1">
-                      <button
-                        type="button"
-                        onClick={() => openSteeringForCard(cardKey)}
-                        aria-expanded={isSteeringOpen}
-                        className={`w-full min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 border transition-colors cursor-pointer ${
-                          isSteeringOpen
-                            ? "bg-[#e11d48]/15 text-white border-[#e11d48]/50"
-                            : "bg-white/[0.03] hover:bg-white/[0.07] text-zinc-200 border-white/[0.08]"
-                        }`}
-                      >
-                        <span className="inline-flex items-center gap-2">
-                          <SlidersHorizontal className="w-3.5 h-3.5 text-[#f59e0b]" />
-                          <span>
-                            {isSteeringOpen
-                              ? "Styr riktning från denna film"
-                              : "Åt rätt håll? Styr vidare från denna"}
-                          </span>
-                        </span>
-                        {isSteeringOpen ? (
-                          <ChevronUp className="w-4 h-4 text-zinc-400" />
-                        ) : (
-                          <ChevronDown className="w-4 h-4 text-zinc-400" />
+                      <div className="flex items-center gap-2">
+                        {onSteerFromMovie && (
+                          <button
+                            type="button"
+                            onClick={() => openSteeringForCard(cardKey)}
+                            aria-expanded={isSteeringOpen}
+                            className={`flex-1 min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 border transition-colors cursor-pointer ${
+                              isSteeringOpen
+                                ? "bg-[#e11d48]/15 text-white border-[#e11d48]/50"
+                                : "bg-white/[0.03] hover:bg-white/[0.07] text-zinc-200 border-white/[0.08]"
+                            }`}
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <SlidersHorizontal className="w-3.5 h-3.5 text-[#f59e0b]" />
+                              <span>
+                                {isSteeringOpen
+                                  ? "Styr riktning från denna film"
+                                  : "Åt rätt håll? Styr vidare från denna"}
+                              </span>
+                            </span>
+                            {isSteeringOpen ? (
+                              <ChevronUp className="w-4 h-4 text-zinc-400" />
+                            ) : (
+                              <ChevronDown className="w-4 h-4 text-zinc-400" />
+                            )}
+                          </button>
                         )}
-                      </button>
+                        {onDismissMovie && (
+                          <button
+                            type="button"
+                            onClick={() => onDismissMovie(rec)}
+                            aria-label={`Inte intresserad av ${rec.title}`}
+                            title="Inte intresserad – göm och styr bort från liknande"
+                            className="min-h-[40px] px-3 py-2 rounded-xl text-xs font-medium bg-white/[0.02] hover:bg-rose-950/40 text-zinc-400 hover:text-rose-300 border border-white/[0.08] hover:border-rose-500/40 flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            <span className="sm:hidden">Göm</span>
+                            <span className="hidden sm:inline">Inte intresserad</span>
+                          </button>
+                        )}
+                      </div>
 
                       {isSteeringOpen && (
                         <div className="mt-3 rounded-xl bg-[#0e0e12] border border-white/[0.1] p-4 space-y-4">

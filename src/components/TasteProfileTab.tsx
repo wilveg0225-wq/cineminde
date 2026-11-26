@@ -10,25 +10,41 @@ import {
   Ban,
   Plus,
   X,
+  Sparkles,
+  EyeOff,
+  RotateCcw,
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import {
   WatchedMovie,
   MovieRecommendation,
+  DismissedMovie,
   calculateTasteStats,
   COMMON_DISLIKED_CATEGORIES,
 } from "../utils/movieLogic";
 import { User } from "firebase/auth";
+
+export type CloudSyncStatus = "synced" | "local_only" | "error";
 
 interface TasteProfileTabProps {
   watchedMovies: WatchedMovie[];
   watchlist: MovieRecommendation[];
   tasteProfileSummary: string;
   dislikedCategories: string[];
+  dismissedMovies?: DismissedMovie[];
   onAddDislikedCategory: (category: string) => void;
   onRemoveDislikedCategory: (category: string) => void;
+  onRestoreDismissedByTitle?: (title: string) => void;
+  onClearDismissedMovies?: () => void;
   isUpdatingProfile: boolean;
   currentUser: User | null;
+  cloudSyncStatus?: CloudSyncStatus;
+  isAdminTestAccount?: boolean;
+  onResetAdminTestAccount?: () => Promise<void> | void;
   onOpenAuthModal: () => void;
+  onOpenCalibration?: () => void;
   onLogout: () => void;
 }
 
@@ -37,14 +53,22 @@ export const TasteProfileTab: React.FC<TasteProfileTabProps> = ({
   watchlist,
   tasteProfileSummary,
   dislikedCategories,
+  dismissedMovies = [],
   onAddDislikedCategory,
   onRemoveDislikedCategory,
+  onRestoreDismissedByTitle,
+  onClearDismissedMovies,
   isUpdatingProfile,
   currentUser,
+  cloudSyncStatus = "synced",
+  isAdminTestAccount = false,
+  onResetAdminTestAccount,
   onOpenAuthModal,
+  onOpenCalibration,
   onLogout,
 }) => {
   const [customInput, setCustomInput] = useState("");
+  const [showDismissedList, setShowDismissedList] = useState(false);
   const stats = calculateTasteStats(watchedMovies);
 
   const handleAddSubmit = (e: React.FormEvent) => {
@@ -119,10 +143,21 @@ export const TasteProfileTab: React.FC<TasteProfileTabProps> = ({
           )}
         </div>
 
-        <div className="pt-2 border-t border-white/[0.06]">
+        <div className="pt-2 border-t border-white/[0.06] space-y-3">
           <p className="text-sm text-zinc-200 leading-relaxed">
             {tasteProfileSummary}
           </p>
+
+          {onOpenCalibration && (
+            <button
+              type="button"
+              onClick={onOpenCalibration}
+              className="w-full min-h-[42px] px-4 py-2 rounded-xl bg-gradient-to-r from-[#e11d48]/15 to-[#f59e0b]/15 hover:from-[#e11d48]/25 hover:to-[#f59e0b]/25 border border-[#f59e0b]/30 text-xs font-semibold text-amber-200 flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            >
+              <Sparkles className="w-4 h-4 text-[#f59e0b]" />
+              <span>Snabb smak-kalibrering (30 sek)</span>
+            </button>
+          )}
         </div>
       </section>
 
@@ -270,6 +305,75 @@ export const TasteProfileTab: React.FC<TasteProfileTabProps> = ({
         )}
       </section>
 
+      {/* Bortvalda / Ratade förslag */}
+      {dismissedMovies.length > 0 && (
+        <section
+          aria-label="Bortvalda förslag"
+          className="bg-[#16161a] border border-white/[0.08] rounded-2xl p-5 space-y-3"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => setShowDismissedList((prev) => !prev)}
+              aria-expanded={showDismissedList}
+              className="flex items-center gap-2.5 text-left min-w-0 flex-1 cursor-pointer"
+            >
+              <EyeOff className="w-4 h-4 text-zinc-400 shrink-0" />
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold text-white">
+                  Bortvalda förslag ({dismissedMovies.length})
+                </h2>
+                <p className="text-[11px] text-zinc-400">
+                  Titlar du markerat som "Inte intresserad" eller "Inte min grej"
+                </p>
+              </div>
+              {showDismissedList ? (
+                <ChevronUp className="w-4 h-4 text-zinc-400 shrink-0 ml-auto" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-zinc-400 shrink-0 ml-auto" />
+              )}
+            </button>
+          </div>
+
+          {showDismissedList && (
+            <div className="pt-2 border-t border-white/[0.06] space-y-3">
+              <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto pr-1">
+                {[...dismissedMovies].reverse().map((item) => (
+                  <span
+                    key={`${item.title}-${item.dismissedAt}`}
+                    className="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08] text-xs text-zinc-300"
+                  >
+                    <span className="truncate max-w-[180px]">{item.title}</span>
+                    {onRestoreDismissedByTitle && (
+                      <button
+                        type="button"
+                        onClick={() => onRestoreDismissedByTitle(item.title)}
+                        aria-label={`Återställ ${item.title}`}
+                        title="Återställ så titeln kan rekommenderas igen"
+                        className="w-5 h-5 rounded-md hover:bg-white/[0.1] text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+
+              {onClearDismissedMovies && (
+                <button
+                  type="button"
+                  onClick={onClearDismissedMovies}
+                  className="w-full min-h-[36px] px-3 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-medium text-zinc-300 hover:text-white flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Rensa alla bortvalda förslag</span>
+                </button>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
       {/* Konto & Molnsynkning (Firebase) */}
       <section
         aria-label="Konto och molnsynkning"
@@ -277,14 +381,20 @@ export const TasteProfileTab: React.FC<TasteProfileTabProps> = ({
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2.5">
-            <CloudCheck className="w-5 h-5 text-[#f59e0b] shrink-0" />
+            {cloudSyncStatus === "error" ? (
+              <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+            ) : (
+              <CloudCheck className="w-5 h-5 text-[#f59e0b] shrink-0" />
+            )}
             <div>
               <h2 className="text-base font-bold text-white">
                 Konto & Molnsynkning
               </h2>
               <p className="text-xs text-zinc-400 mt-0.5">
                 {currentUser
-                  ? "Dina filmer, betyg och watchlist synkas automatiskt med ditt konto."
+                  ? cloudSyncStatus === "error"
+                    ? "Molnsynk saknar Firestore-behörighet just nu – dina ändringar sparas lokalt i webbläsaren."
+                    : "Dina filmer, betyg och watchlist synkas automatiskt med ditt konto."
                   : "Logga in för att spara dina filmer på ditt konto och synka mellan mobil och dator."}
               </p>
             </div>
@@ -292,29 +402,62 @@ export const TasteProfileTab: React.FC<TasteProfileTabProps> = ({
         </div>
 
         {currentUser ? (
-          <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center shrink-0">
-                <UserCheck className="w-4 h-4 text-emerald-400" />
+          <div className="pt-2 border-t border-white/[0.06] space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div
+                  className={`w-8 h-8 rounded-xl border flex items-center justify-center shrink-0 ${
+                    cloudSyncStatus === "error"
+                      ? "bg-amber-500/15 border-amber-500/35"
+                      : "bg-emerald-500/15 border-emerald-500/35"
+                  }`}
+                >
+                  {cloudSyncStatus === "error" ? (
+                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                  ) : (
+                    <UserCheck className="w-4 h-4 text-emerald-400" />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-white truncate">
+                    {currentUser.displayName || currentUser.email}
+                  </p>
+                  <p
+                    className={`text-[11px] ${
+                      cloudSyncStatus === "error"
+                        ? "text-amber-400"
+                        : "text-emerald-400"
+                    }`}
+                  >
+                    {cloudSyncStatus === "error"
+                      ? "Inloggad · Sparas lokalt (molnsynk ej tillgänglig)"
+                      : isAdminTestAccount
+                      ? "Admin-testkonto · nollställs vid ny inloggning"
+                      : "Inloggad · Molnsynkning aktiv"}
+                  </p>
+                </div>
               </div>
-              <div className="min-w-0">
-                <p className="text-xs font-semibold text-white truncate">
-                  {currentUser.displayName || currentUser.email}
-                </p>
-                <p className="text-[11px] text-emerald-400">
-                  Inloggad · Molnsynkning aktiv
-                </p>
-              </div>
+
+              <button
+                type="button"
+                onClick={onLogout}
+                className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#0a0a0c] hover:bg-white/[0.06] border border-white/[0.1] text-xs font-medium text-zinc-300 hover:text-white flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Logga ut</span>
+              </button>
             </div>
 
-            <button
-              type="button"
-              onClick={onLogout}
-              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#0a0a0c] hover:bg-white/[0.06] border border-white/[0.1] text-xs font-medium text-zinc-300 hover:text-white flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span>Logga ut</span>
-            </button>
+            {isAdminTestAccount && onResetAdminTestAccount && (
+              <button
+                type="button"
+                onClick={() => void onResetAdminTestAccount()}
+                className="w-full min-h-[40px] px-3.5 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-xs font-semibold text-amber-200 flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                <span>Nollställ testkonto nu</span>
+              </button>
+            )}
           </div>
         ) : (
           <button

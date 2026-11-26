@@ -8,6 +8,7 @@ import { createServer as createViteServer } from "vite";
 import {
   WatchedMovie,
   MovieRecommendation,
+  DismissedMovie,
   EveningPreferences,
   TmdbMovieEnrichment,
   buildRecommendationSystemPrompt,
@@ -25,6 +26,7 @@ import {
   parseTmdbTvAgeRating,
   inferAgeRatingFromGenres,
   filterAndVerifyMoviesByTmdbCategories,
+  limitAnimatedRecommendations,
   normalizeProviderKey,
   movieMatchesStreamingProviders,
   extractTmdbVerificationRules,
@@ -44,6 +46,10 @@ import {
   formatSelectedChipsWithContext,
   describeSteeringAdjustments,
   buildSteeringPromptLines,
+  selectFavoriteSeedsForTmdb,
+  buildHybridCandidatePool,
+  formatCandidatePoolForPrompt,
+  resolveRecommendationTemperature,
   GENRE_GROUPS,
   CONTENT_GROUPS,
   SETTING_GROUPS,
@@ -93,6 +99,54 @@ function isTransientGeminiError(err: unknown): boolean {
   );
 }
 
+type GeminiResponseSchema = NonNullable<
+  Parameters<GoogleGenAI["models"]["generateContent"]>[0]["config"]
+>["responseSchema"];
+
+const RECOMMENDATIONS_RESPONSE_SCHEMA: GeminiResponseSchema = {
+  type: Type.ARRAY,
+  items: {
+    type: Type.OBJECT,
+    properties: {
+      title: { type: Type.STRING },
+      originalTitle: { type: Type.STRING },
+      year: { type: Type.STRING },
+      runtime: { type: Type.STRING },
+      mediaType: { type: Type.STRING },
+      ageRating: { type: Type.STRING },
+      matchPercentage: { type: Type.INTEGER },
+      whyYouWillLikeIt: { type: Type.STRING },
+      vibeTags: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+      },
+      isExactPinpointMatch: { type: Type.BOOLEAN },
+    },
+    required: [
+      "title",
+      "year",
+      "runtime",
+      "mediaType",
+      "matchPercentage",
+      "whyYouWillLikeIt",
+      "vibeTags",
+      "isExactPinpointMatch",
+    ],
+  },
+};
+
+const TASTE_PROFILE_RESPONSE_SCHEMA: GeminiResponseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    summary: { type: Type.STRING },
+  },
+  required: ["summary"],
+};
+
+// Short cooldown map so models returning 503/timeout don't stall subsequent requests
+const geminiModelCooldownUntil = new Map<string, number>();
+const GEMINI_MODEL_COOLDOWN_MS = 2 * 60 * 1000;
+
 async function callGeminiWithFallback(
   ai: GoogleGenAI,
   params: {
@@ -100,27 +154,44 @@ async function callGeminiWithFallback(
     systemInstruction?: string;
     temperature: number;
     responseMimeType?: string;
+    responseSchema?: GeminiResponseSchema;
     label?: string;
+    maxTotalMs?: number;
   }
 ): Promise<string | null> {
-  const modelsToTry: Array<{
+  // Prioritize fast, reliable production Flash models with a hard total time budget
+  // so users never wait 15–20 seconds during a Gemini 503/latency spike.
+  const allModels: Array<{
     name: string;
     timeoutMs: number;
   }> = [
-    { name: "gemini-flash-lite-latest", timeoutMs: 12000 },
-    { name: "gemini-3.1-flash-lite", timeoutMs: 12000 },
-    { name: "gemini-flash-latest", timeoutMs: 14000 },
-    { name: "gemini-3.5-flash-lite", timeoutMs: 10000 },
-    { name: "gemini-3.8-flash", timeoutMs: 12000 },
-    { name: "gemini-3.1-flash-lite-preview", timeoutMs: 10000 },
+    { name: "gemini-3.8-flash", timeoutMs: 5000 },
+    { name: "gemini-3.5-flash-lite", timeoutMs: 4500 },
+    { name: "gemini-flash-latest", timeoutMs: 4500 },
+    { name: "gemini-flash-lite-latest", timeoutMs: 4000 },
   ];
+
+  const now = Date.now();
+  const maxTotalMs = params.maxTotalMs ?? 7500;
+  const deadline = now + maxTotalMs;
+  const readyModels = allModels.filter(
+    (m) => (geminiModelCooldownUntil.get(m.name) || 0) <= now
+  );
+  const coolingModels = allModels.filter(
+    (m) => (geminiModelCooldownUntil.get(m.name) || 0) > now
+  );
+  // Try ready models first; only touch cooling models if we still have budget left
+  const modelsToTry = [...readyModels, ...coolingModels];
 
   const tag = params.label || "generateContent";
 
-  const tryModelOnce = async (modelSpec: {
-    name: string;
-    timeoutMs: number;
-  }): Promise<{ text: string | null; transient: boolean }> => {
+  const tryModelOnce = async (
+    modelSpec: {
+      name: string;
+      timeoutMs: number;
+    },
+    attemptTimeoutMs: number
+  ): Promise<{ text: string | null; transient: boolean }> => {
     try {
       const response = await ai.models.generateContent({
         model: modelSpec.name,
@@ -130,12 +201,16 @@ async function callGeminiWithFallback(
             ? { systemInstruction: params.systemInstruction }
             : {}),
           responseMimeType: params.responseMimeType || "application/json",
+          ...(params.responseSchema
+            ? { responseSchema: params.responseSchema }
+            : {}),
           temperature: params.temperature,
-          abortSignal: AbortSignal.timeout(modelSpec.timeoutMs),
+          abortSignal: AbortSignal.timeout(attemptTimeoutMs),
         },
       });
       const text = response?.text?.trim();
       if (text) {
+        geminiModelCooldownUntil.delete(modelSpec.name);
         return { text, transient: false };
       }
       console.warn(`[Gemini:${tag}] Empty response from ${modelSpec.name}`);
@@ -143,6 +218,12 @@ async function callGeminiWithFallback(
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       const transient = isTransientGeminiError(err);
+      if (transient) {
+        geminiModelCooldownUntil.set(
+          modelSpec.name,
+          Date.now() + GEMINI_MODEL_COOLDOWN_MS
+        );
+      }
       console.warn(
         `[Gemini:${tag}] ${modelSpec.name} failed (transient=${transient}): ${errMsg.slice(
           0,
@@ -153,22 +234,18 @@ async function callGeminiWithFallback(
     }
   };
 
-  // Pass 1: Fail over quickly across models (1 attempt each so a 503/slow model never stalls the request)
-  const transientCandidates: Array<{ name: string; timeoutMs: number }> = [];
+  // Single fast pass strictly bounded by maxTotalMs — no slow Pass 2 retries
   for (const modelSpec of modelsToTry) {
-    const res = await tryModelOnce(modelSpec);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < 1200) {
+      console.warn(`[Gemini:${tag}] Time budget (${maxTotalMs}ms) reached; falling back.`);
+      break;
+    }
+    const attemptTimeout = Math.min(modelSpec.timeoutMs, remainingMs);
+    const res = await tryModelOnce(modelSpec, attemptTimeout);
     if (res.text) return res.text;
-    if (res.transient) transientCandidates.push(modelSpec);
   }
 
-  // Pass 2: Quick single retry on top 2 transient candidates if all models had a brief spike
-  if (transientCandidates.length > 0) {
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    for (const modelSpec of transientCandidates.slice(0, 2)) {
-      const res = await tryModelOnce(modelSpec);
-      if (res.text) return res.text;
-    }
-  }
   console.warn(`[Gemini:${tag}] All models failed; falling back to TMDB/local curator.`);
   return null;
 }
@@ -181,8 +258,331 @@ function getEffectiveTmdbKey(headerKey?: string): string | null {
   return candidate;
 }
 
+const WATCH_PROVIDERS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const COLLAB_RECS_CACHE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
+
 const tmdbEnrichCache = new Map<string, TmdbMovieEnrichment>();
 const tmdbAgeRatingCache = new Map<string, string>();
+const tmdbWatchProvidersCache = new Map<
+  string,
+  { data: ReturnType<typeof parseTmdbSwedishProviders>; expiresAt: number }
+>();
+const tmdbCollabRecsCache = new Map<
+  string,
+  { data: Array<Record<string, unknown>>; expiresAt: number }
+>();
+
+async function fetchTmdbSwedishProvidersCached(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  tmdbKey: string
+): Promise<ReturnType<typeof parseTmdbSwedishProviders> | undefined> {
+  if (!tmdbId || tmdbId >= 900000) return undefined;
+  const cacheKey = `${mediaType}:${tmdbId}`;
+  const cached = tmdbWatchProvidersCache.get(cacheKey);
+  if (cached) {
+    if (cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
+    tmdbWatchProvidersCache.delete(cacheKey);
+  }
+
+  try {
+    const providersData = (await fetchFromTmdbApi(
+      `/${mediaType}/${tmdbId}/watch/providers`,
+      tmdbKey
+    )) as { results?: Record<string, unknown> };
+    const parsed = parseTmdbSwedishProviders(providersData?.results?.SE);
+    if (tmdbWatchProvidersCache.size > 1500) {
+      const oldestKey = tmdbWatchProvidersCache.keys().next().value;
+      if (oldestKey) tmdbWatchProvidersCache.delete(oldestKey);
+    }
+    tmdbWatchProvidersCache.set(cacheKey, {
+      data: parsed,
+      expiresAt: Date.now() + WATCH_PROVIDERS_CACHE_TTL_MS,
+    });
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveSeedTmdbIdentity(
+  movie: WatchedMovie,
+  tmdbKey: string
+): Promise<{ tmdbId: number; mediaType: "movie" | "tv"; title: string } | null> {
+  const inferredType: "movie" | "tv" =
+    movie.mediaType === "tv" ||
+    (movie.seasons && movie.seasons.length > 0) ||
+    (movie.seasonCount && movie.seasonCount > 0)
+      ? "tv"
+      : "movie";
+
+  if (movie.tmdbId && movie.tmdbId < 900000) {
+    return { tmdbId: movie.tmdbId, mediaType: inferredType, title: movie.title };
+  }
+
+  const curated = lookupCuratedTmdbMovie(movie.originalTitle || movie.title, movie.year);
+  if (curated.tmdbId && curated.tmdbId < 900000) {
+    return {
+      tmdbId: curated.tmdbId,
+      mediaType: curated.mediaType || inferredType,
+      title: movie.title,
+    };
+  }
+
+  try {
+    const query = movie.originalTitle || movie.title;
+    const searchData = (await fetchFromTmdbApi(
+      `/search/${inferredType}?query=${encodeURIComponent(query)}&language=sv-SE`,
+      tmdbKey
+    )) as { results?: Array<Record<string, unknown>> };
+    const best = pickBestTmdbCandidate(
+      searchData?.results || [],
+      movie.year,
+      query
+    );
+    if (best && best.id) {
+      return {
+        tmdbId: Number(best.id),
+        mediaType: inferredType,
+        title: movie.title,
+      };
+    }
+  } catch {
+    // Ignore seed lookup failures
+  }
+  return null;
+}
+
+function isLikelySwedishText(text: string): boolean {
+  if (!text || text.trim().length < 20) return false;
+  const lower = ` ${text.toLowerCase()} `;
+  // Swedish diacritics are a strong positive signal
+  const hasSwedishChars = /[åäö]/.test(lower);
+  const swedishWordHits = (
+    lower.match(
+      /\b(och|att|som|för|med|det|den|är|på|av|till|från|när|efter|blir|sin|sitt|sig|ett|inte|har|kan|vid|utan|över|under|mellan|genom)\b/g
+    ) || []
+  ).length;
+  const englishWordHits = (
+    lower.match(
+      /\b(the|with|when|after|about|their|from|into|that|this|they|have|been|where|which|while|through|between|against|becomes|story|follows|young|life)\b/g
+    ) || []
+  ).length;
+
+  if (englishWordHits >= 3 && !hasSwedishChars && swedishWordHits < 2) {
+    return false;
+  }
+  if (englishWordHits > swedishWordHits * 2 && !hasSwedishChars) {
+    return false;
+  }
+  return hasSwedishChars || swedishWordHits >= 2;
+}
+
+async function fetchCollaborativeTmdbCandidates(
+  watchedMovies: WatchedMovie[],
+  preferences: EveningPreferences,
+  tmdbKey: string,
+  dislikedCategories: string[] = [],
+  previousTitles: string[] = [],
+  page = 1,
+  limit = 25
+): Promise<MovieRecommendation[]> {
+  try {
+    if (!watchedMovies || watchedMovies.length === 0) return [];
+    const effectiveMediaType = resolveEffectiveMediaType(preferences);
+    const seedMovies = selectFavoriteSeedsForTmdb(watchedMovies, effectiveMediaType, 5);
+    if (seedMovies.length === 0) return [];
+
+    const resolvedSeeds = (
+      await Promise.all(seedMovies.map((m) => resolveSeedTmdbIdentity(m, tmdbKey)))
+    ).filter((s): s is { tmdbId: number; mediaType: "movie" | "tv"; title: string } =>
+      Boolean(s)
+    );
+    if (resolvedSeeds.length === 0) return [];
+
+    const tmdbPage = Math.max(1, Math.min(3, Number(page) || 1));
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const previousNorms = new Set(
+      (previousTitles || []).map((t) => normalizeMovieTitle(t)).filter(Boolean)
+    );
+
+    const seedResults = await Promise.all(
+      resolvedSeeds.map(async (seed) => {
+        const cacheKey = `${seed.mediaType}:${seed.tmdbId}:p${tmdbPage}`;
+        const cachedCollab = tmdbCollabRecsCache.get(cacheKey);
+        let results: Array<Record<string, unknown>> | undefined;
+        if (cachedCollab) {
+          if (cachedCollab.expiresAt > Date.now()) {
+            results = cachedCollab.data;
+          } else {
+            tmdbCollabRecsCache.delete(cacheKey);
+          }
+        }
+        if (!results) {
+          try {
+            const data = (await fetchFromTmdbApi(
+              `/${seed.mediaType}/${seed.tmdbId}/recommendations?language=sv-SE&page=${tmdbPage}`,
+              tmdbKey
+            )) as { results?: Array<Record<string, unknown>> };
+            results = Array.isArray(data?.results) ? data.results : [];
+            if (tmdbCollabRecsCache.size > 500) {
+              const oldestKey = tmdbCollabRecsCache.keys().next().value;
+              if (oldestKey) tmdbCollabRecsCache.delete(oldestKey);
+            }
+            tmdbCollabRecsCache.set(cacheKey, {
+              data: results,
+              expiresAt: Date.now() + COLLAB_RECS_CACHE_TTL_MS,
+            });
+          } catch {
+            results = [];
+          }
+        }
+        return { seed, results };
+      })
+    );
+
+    interface AggregatedCollab {
+      hit: Record<string, unknown>;
+      mediaType: "movie" | "tv";
+      seedTitles: string[];
+    }
+    const aggregated = new Map<string, AggregatedCollab>();
+
+    for (const { seed, results } of seedResults) {
+      for (const hit of results) {
+        if (!hit || !hit.id) continue;
+        const dateStr = String(hit.release_date || hit.first_air_date || "");
+        if (!dateStr || dateStr > todayStr) continue;
+        const voteAvg = typeof hit.vote_average === "number" ? hit.vote_average : 0;
+        const voteCount = typeof hit.vote_count === "number" ? hit.vote_count : 0;
+        if (voteAvg < 6.4 || voteCount < 25) continue;
+
+        const title = String(hit.title || hit.name || "").trim();
+        const originalTitle = String(
+          hit.original_title || hit.original_name || title
+        ).trim();
+        const t1 = normalizeMovieTitle(title);
+        const t2 = originalTitle ? normalizeMovieTitle(originalTitle) : "";
+        if ((t1 && previousNorms.has(t1)) || (t2 && previousNorms.has(t2))) {
+          continue;
+        }
+
+        const key = `${seed.mediaType}:${hit.id}`;
+        const existing = aggregated.get(key);
+        if (existing) {
+          if (!existing.seedTitles.includes(seed.title)) {
+            existing.seedTitles.push(seed.title);
+          }
+        } else {
+          aggregated.set(key, {
+            hit,
+            mediaType: seed.mediaType,
+            seedTitles: [seed.title],
+          });
+        }
+      }
+    }
+
+    const sortedAgg = Array.from(aggregated.values()).sort((a, b) => {
+      if (b.seedTitles.length !== a.seedTitles.length) {
+        return b.seedTitles.length - a.seedTitles.length;
+      }
+      const ratingA = typeof a.hit.vote_average === "number" ? a.hit.vote_average : 7.0;
+      const ratingB = typeof b.hit.vote_average === "number" ? b.hit.vote_average : 7.0;
+      return ratingB - ratingA;
+    });
+
+    const candidates: MovieRecommendation[] = sortedAgg.slice(0, limit * 2).map(
+      ({ hit, mediaType, seedTitles }) => {
+        const dateStr = String(hit.release_date || hit.first_air_date || "");
+        const year = dateStr.slice(0, 4);
+        const title = String(hit.title || hit.name || "").trim();
+        const originalTitle = String(
+          hit.original_title || hit.original_name || title
+        ).trim();
+        const originalLanguage = String(hit.original_language || "").trim();
+        const rawGenreIds = Array.isArray(hit.genre_ids)
+          ? hit.genre_ids.map(Number).filter((n) => !Number.isNaN(n) && n > 0)
+          : [];
+        const tmdbGenres = mapTmdbGenreIdsToNames(rawGenreIds);
+        const voteAverage =
+          typeof hit.vote_average === "number" && hit.vote_average > 0
+            ? Math.round(hit.vote_average * 10) / 10
+            : 7.5;
+        const posterPath = hit.poster_path ? String(hit.poster_path) : undefined;
+        const overview = String(hit.overview || "").trim();
+        const seedLabel = seedTitles.slice(0, 2).join(" och ");
+        const genrePhrase =
+          tmdbGenres.length > 0
+            ? ` inom ${tmdbGenres.slice(0, 2).join(" & ").toLowerCase()}`
+            : "";
+        const motivation =
+          overview.length > 30 && isLikelySwedishText(overview)
+            ? `Uppskattas ofta av tittare som gillade ${seedLabel}. ${overview}`
+            : `Uppskattas ofta av tittare som gillade ${seedLabel} – stark träff${genrePhrase} med högt publikbetyg (${voteAverage}/10).`;
+
+        return {
+          id: `tmdb-collab-${hit.id}`,
+          title,
+          originalTitle,
+          originalLanguage: originalLanguage || undefined,
+          year: year || "2020",
+          mediaType,
+          runtime: mediaType === "tv" ? "TV-serie" : "Film",
+          matchPercentage: Math.min(
+            94,
+            Math.max(84, Math.round(80 + voteAverage + Math.min(3, seedTitles.length) * 2))
+          ),
+          whyYouWillLikeIt: motivation,
+          vibeTags: tmdbGenres.slice(0, 3),
+          tmdbId: Number(hit.id),
+          posterPath,
+          tmdbRating: voteAverage,
+          tmdbGenreIds: rawGenreIds,
+          tmdbGenres,
+          recommendedFromSeeds: seedTitles,
+        };
+      }
+    );
+
+    const effectivePreferences: EveningPreferences = {
+      ...preferences,
+      mediaType: effectiveMediaType,
+    };
+
+    let filtered = filterAndVerifyMoviesByTmdbCategories(
+      candidates,
+      effectivePreferences
+    );
+    if (dislikedCategories.length > 0) {
+      filtered = filterOutDislikedCategories(filtered, dislikedCategories);
+    }
+
+    // Resolve non-Latin titles for top candidates
+    const topSlice = filtered.slice(0, limit);
+    const cleaned = await Promise.all(
+      topSlice.map(async (item) => {
+        if (hasNonLatinScript(item.title) && item.tmdbId) {
+          const enTitle = await fetchTmdbEnglishTitle(
+            item.tmdbId,
+            item.mediaType === "tv" ? "tv" : "movie",
+            tmdbKey
+          );
+          if (enTitle) {
+            return { ...item, title: enTitle };
+          }
+        }
+        return item;
+      })
+    );
+
+    return cleaned;
+  } catch {
+    return [];
+  }
+}
 
 async function fetchTmdbAgeRating(
   tmdbId: number,
@@ -275,37 +675,62 @@ function getTmdbProviderIds(selectedServices: string[]): number[] {
 
 function pickBestTmdbCandidate(
   results: Array<Record<string, unknown>>,
-  targetYear?: string
+  targetYear?: string,
+  targetTitle?: string
 ): Record<string, unknown> | undefined {
   if (!results || results.length === 0) return undefined;
-  if (!targetYear) return results[0];
 
-  const cleanTarget = targetYear.replace(/[^0-9]/g, "").slice(0, 4);
-  if (!cleanTarget) return results[0];
+  const cleanTargetYear = targetYear
+    ? targetYear.replace(/[^0-9]/g, "").slice(0, 4)
+    : "";
+  const targetNum = cleanTargetYear ? Number(cleanTargetYear) : 0;
+  const targetNorm = targetTitle ? normalizeMovieTitle(targetTitle) : "";
 
-  const targetNum = Number(cleanTarget);
-  // 1. Exact release year match
-  const exact = results.find((r) => {
-    const d = String(r.release_date || r.first_air_date || "").slice(0, 4);
-    return d === cleanTarget;
+  const scored = results.map((r) => {
+    let score = 0;
+
+    // 1. Title similarity (handles both exact matches and Swedish/English variants like "Parasit" vs "Parasite")
+    if (targetNorm) {
+      const t1 = normalizeMovieTitle(String(r.title || r.name || ""));
+      const t2 = normalizeMovieTitle(
+        String(r.original_title || r.original_name || "")
+      );
+      if (t1 === targetNorm || t2 === targetNorm) {
+        score += 32;
+      } else if (
+        (t1 && (t1.includes(targetNorm) || targetNorm.includes(t1))) ||
+        (t2 && (t2.includes(targetNorm) || targetNorm.includes(t2)))
+      ) {
+        score += 18;
+      }
+    }
+
+    // 2. Release year proximity (allows ±1 year for festival/Dec-Jan premiere discrepancies)
+    if (targetNum > 1900) {
+      const candYear = Number(
+        String(r.release_date || r.first_air_date || "").slice(0, 4)
+      );
+      if (candYear > 1900) {
+        const diff = Math.abs(candYear - targetNum);
+        if (diff === 0) score += 38;
+        else if (diff === 1) score += 26;
+        else if (diff === 2) score += 8;
+        else if (diff > 5) score -= 18;
+      }
+    }
+
+    // 3. Popularity, vote count & poster presence (strongly favors real well-known releases over obscure 0-vote stubs)
+    const voteCount = typeof r.vote_count === "number" ? r.vote_count : 0;
+    const pop = typeof r.popularity === "number" ? r.popularity : 0;
+    score += Math.min(60, Math.log10(Math.max(0, voteCount) + 1) * 14);
+    score += Math.min(12, Math.log10(Math.max(0, pop) + 1) * 4);
+    if (r.poster_path) score += 8;
+
+    return { r, score };
   });
-  if (exact) return exact;
 
-  // 2. Near release year match (within 1 year)
-  const near = results.find((r) => {
-    const d = Number(
-      String(r.release_date || r.first_air_date || "").slice(0, 4)
-    );
-    return d > 1900 && Math.abs(d - targetNum) <= 1;
-  });
-  if (near) return near;
-
-  // 3. Fallback to candidate with highest popularity
-  return [...results].sort((a, b) => {
-    const popA = typeof a.popularity === "number" ? a.popularity : 0;
-    const popB = typeof b.popularity === "number" ? b.popularity : 0;
-    return popB - popA;
-  })[0];
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.r;
 }
 
 async function fetchTmdbEnglishTitle(
@@ -502,16 +927,30 @@ async function discoverTmdbCandidates(
       }
 
       // If no specific evening filters were chosen (e.g. taste profile mode in "För dig"),
-      // derive target genres from the user's loved movies (rated >= 4 and liked)
+      // derive target genres from the user's loved titles of the SAME mediaType first (separating movie vs TV taste)
       if (
         ruleTokens.length === 0 &&
         !hasExplicitEveningFilters &&
         watchedMovies.length > 0
       ) {
+        const inferWatchedType = (m: WatchedMovie): "movie" | "tv" =>
+          m.mediaType === "tv" ||
+          (m.seasons && m.seasons.length > 0) ||
+          (m.seasonCount && m.seasonCount > 0)
+            ? "tv"
+            : "movie";
         const loved = watchedMovies.filter(
           (m) => m.rating >= 4 && m.liked !== false
         );
-        const sourceMovies = loved.length > 0 ? loved : watchedMovies;
+        const sameMediaLoved = loved.filter(
+          (m) => inferWatchedType(m) === mediaType
+        );
+        const sourceMovies =
+          sameMediaLoved.length > 0
+            ? sameMediaLoved
+            : loved.length > 0
+            ? loved
+            : watchedMovies;
         const genreCounts: Record<number, number> = {};
         for (const m of sourceMovies) {
           for (const gid of m.tmdbGenreIds || []) {
@@ -577,12 +1016,12 @@ async function discoverTmdbCandidates(
           : discoverFilters.companyIds.length > 0
           ? 30
           : discoverFilters.keywordGroups.length > 0
-          ? 25
+          ? 50
           : usedFallbackGenres
           ? 300
           : hasProviders
-          ? 25
-          : 100);
+          ? 50
+          : 150);
       const voteCountMaxParam = discoverFilters.maxVoteCount
         ? `&vote_count.lte=${discoverFilters.maxVoteCount}`
         : "";
@@ -745,15 +1184,19 @@ async function discoverTmdbCandidates(
             ? String(hit.poster_path)
             : undefined;
           const overview = String(hit.overview || "").trim();
+          const genreSummary =
+            tmdbGenres.length > 0
+              ? tmdbGenres.slice(0, 2).join(" & ").toLowerCase()
+              : "dina valda kategorier";
 
           const motivation =
-            overview.length > 30
+            overview.length > 30 && isLikelySwedishText(overview)
               ? overview
               : hasProviders
-              ? `Topprankad och bekräftad titel på ${selectedServices.join(
+              ? `Hyllad titel inom ${genreSummary} som ingår på ${selectedServices.join(
                   ", "
-                )} i Sverige som matchar dina val och stämningar med högt betyg (${voteAverage}/10).`
-              : `Topprankad och hyllad titel som förenar dina valda genrer och kategorier med högt betyg (${voteAverage}/10).`;
+                )} i Sverige och matchar kvällens val med högt publikbetyg (${voteAverage}/10).`
+              : `Hyllad och topprankad titel inom ${genreSummary} som matchar kvällens val och din smakprofil (${voteAverage}/10 på TMDB).`;
 
           const matchedProviders = hasProviders
             ? selectedServices.map((name) => ({
@@ -790,6 +1233,16 @@ async function discoverTmdbCandidates(
       }
       }
     }
+
+    // Quality-weighted ranking: prefer critically acclaimed hits (higher TMDB rating) while keeping strong popularity
+    discovered.sort((a, b) => {
+      const ratingA = a.tmdbRating || 7.0;
+      const ratingB = b.tmdbRating || 7.0;
+      if (Math.abs(ratingB - ratingA) >= 0.35) {
+        return ratingB - ratingA;
+      }
+      return (b.matchPercentage || 0) - (a.matchPercentage || 0);
+    });
 
     // Deduplicate discovered pool by tmdbId, normalized title, AND max 1 per franchise (e.g. max 1 Harry Potter / Toy Story / Vaiana)
     const seenIds = new Set<number>();
@@ -943,6 +1396,13 @@ async function discoverTmdbCandidates(
       verifiedDiscovered = latinOnly;
     }
 
+    verifiedDiscovered = limitAnimatedRecommendations(
+      verifiedDiscovered,
+      effectivePreferences,
+      1,
+      watchedMovies
+    );
+
     return verifiedDiscovered.slice(0, limit);
   } catch {
     return [];
@@ -979,24 +1439,52 @@ async function enrichSingleMovieWithTmdb(
     let resolvedType: "movie" | "tv" = preferredMediaType || "movie";
 
     for (const type of typesToTry) {
-      const yearParam = cleanYear
-        ? type === "tv"
-          ? `&first_air_date_year=${encodeURIComponent(cleanYear)}`
-          : `&year=${encodeURIComponent(cleanYear)}`
-        : "";
-      const searchData = (await fetchFromTmdbApi(
-        `/search/${type}?query=${encodeURIComponent(title)}${yearParam}&language=sv-SE`,
+      // Search without strict year lock first so ±1 year festival/premiere offsets
+      // (e.g. The Gentlemen 2019 vs 2020) never exclude the real film in favor of obscure stubs
+      const broadData = (await fetchFromTmdbApi(
+        `/search/${type}?query=${encodeURIComponent(title)}&language=sv-SE`,
         tmdbKey
       )) as { results?: Array<Record<string, unknown>> };
+      let combinedResults: Array<Record<string, unknown>> = Array.isArray(
+        broadData?.results
+      )
+        ? [...broadData.results]
+        : [];
 
-      let candidate = pickBestTmdbCandidate(searchData?.results || [], cleanYear);
-      if (!candidate && yearParam) {
-        const retryData = (await fetchFromTmdbApi(
-          `/search/${type}?query=${encodeURIComponent(title)}&language=sv-SE`,
-          tmdbKey
-        )) as { results?: Array<Record<string, unknown>> };
-        candidate = pickBestTmdbCandidate(retryData?.results || [], cleanYear);
+      // If a specific year was requested and none of the broad hits is a well-known match
+      // within ±1 year (e.g. Swedish title differs from English query like "Parasit" vs "Parasite",
+      // or an older classic sharing a common title), also query the year-filtered endpoint
+      if (cleanYear) {
+        const targetNum = Number(cleanYear);
+        const hasStrongNearYearHit = combinedResults.some((r) => {
+          const y = Number(
+            String(r.release_date || r.first_air_date || "").slice(0, 4)
+          );
+          const votes = typeof r.vote_count === "number" ? r.vote_count : 0;
+          return y > 1900 && Math.abs(y - targetNum) <= 1 && votes >= 50;
+        });
+        if (!hasStrongNearYearHit) {
+          const yearParam =
+            type === "tv"
+              ? `&first_air_date_year=${encodeURIComponent(cleanYear)}`
+              : `&year=${encodeURIComponent(cleanYear)}`;
+          const yearData = (await fetchFromTmdbApi(
+            `/search/${type}?query=${encodeURIComponent(title)}${yearParam}&language=en-US`,
+            tmdbKey
+          )) as { results?: Array<Record<string, unknown>> };
+          if (Array.isArray(yearData?.results)) {
+            const seenIds = new Set(combinedResults.map((r) => r.id));
+            for (const yr of yearData.results) {
+              if (!seenIds.has(yr.id)) {
+                combinedResults.push(yr);
+                seenIds.add(yr.id);
+              }
+            }
+          }
+        }
       }
+
+      const candidate = pickBestTmdbCandidate(combinedResults, cleanYear, title);
 
       if (candidate && candidate.id) {
         topHit = candidate;
@@ -1322,6 +1810,7 @@ async function startServer() {
         previousTitles = [],
         limit = 5,
         dislikedCategories = [],
+        dismissedMovies = [],
       } = req.body as {
         watchedMovies: WatchedMovie[];
         watchlist: MovieRecommendation[];
@@ -1330,6 +1819,7 @@ async function startServer() {
         previousTitles?: string[];
         limit?: number;
         dislikedCategories?: string[];
+        dismissedMovies?: DismissedMovie[];
       };
 
       const requestedLimit = Math.max(5, Math.min(15, Number(limit) || 5));
@@ -1357,8 +1847,14 @@ async function startServer() {
       };
 
       const hasSteering = Boolean(effectivePreferences.steering?.anchorMovie?.title);
+      const dismissedTitleStrings = (dismissedMovies || []).flatMap((d) =>
+        d.originalTitle && d.originalTitle !== d.title
+          ? [d.title, d.originalTitle]
+          : [d.title]
+      );
       const effectivePreviousTitles = [
         ...(previousTitles || []),
+        ...dismissedTitleStrings,
         ...(hasSteering && effectivePreferences.steering?.anchorMovie?.title
           ? [
               effectivePreferences.steering.anchorMovie.title,
@@ -1475,17 +1971,69 @@ async function startServer() {
       };
 
       let discoveredPool: MovieRecommendation[] = [];
+      let collaborativePool: MovieRecommendation[] = [];
+      let hybridCandidatePool: MovieRecommendation[] = [];
+
       if (tmdbKey) {
-        discoveredPool = await discoverTmdbCandidates(
-          verificationPreferences,
-          selectedServices,
-          tmdbKey,
-          20,
+        const [discRes, collabRes] = await Promise.all([
+          discoverTmdbCandidates(
+            verificationPreferences,
+            selectedServices,
+            tmdbKey,
+            20,
+            dislikedCategories,
+            effectivePreviousTitles,
+            requestPage,
+            watchedMovies
+          ),
+          fetchCollaborativeTmdbCandidates(
+            watchedMovies,
+            verificationPreferences,
+            tmdbKey,
+            dislikedCategories,
+            effectivePreviousTitles,
+            requestPage,
+            25
+          ),
+        ]);
+        discoveredPool = discRes;
+        collaborativePool = collabRes;
+
+        // When streaming services are selected, verify Swedish watch providers for top
+        // collaborative candidates not already present in the streaming-filtered Discover pool
+        if (selectedServices.length > 0 && collaborativePool.length > 0) {
+          const discoveredIds = new Set(
+            discoveredPool
+              .filter((d) => d.tmdbId)
+              .map((d) => `${d.mediaType || "movie"}:${d.tmdbId}`)
+          );
+          const toCheck = collaborativePool.slice(0, 15);
+          const checked = await Promise.all(
+            toCheck.map(async (item) => {
+              const idKey = `${item.mediaType || "movie"}:${item.tmdbId}`;
+              if (discoveredIds.has(idKey)) return item;
+              if (!item.tmdbId) return item;
+              const providers = await fetchTmdbSwedishProvidersCached(
+                item.tmdbId,
+                item.mediaType === "tv" ? "tv" : "movie",
+                tmdbKey
+              );
+              return providers ? { ...item, swedishProviders: providers } : item;
+            })
+          );
+          collaborativePool = [...checked, ...collaborativePool.slice(15)];
+        }
+
+        hybridCandidatePool = buildHybridCandidatePool({
+          collaborativeCandidates: collaborativePool,
+          discoveredCandidates: discoveredPool,
+          watchedMovies,
+          watchlist,
+          previousTitles: effectivePreviousTitles,
           dislikedCategories,
-          effectivePreviousTitles,
-          requestPage,
-          watchedMovies
-        );
+          preferences: verificationPreferences,
+          maxCandidates: 30,
+        });
       }
 
       if (ai) {
@@ -1496,16 +2044,19 @@ async function startServer() {
           effectivePreferences,
           effectivePreviousTitles,
           dislikedCategories,
-          candidateTargetCount
+          candidateTargetCount,
+          dismissedMovies
         );
 
-        const sampleTitles =
-          selectedServices.length > 0
-            ? discoveredPool
-                .slice(0, 8)
-                .map((d) => `"${d.title}" (${d.year})`)
-                .join(", ")
-            : "";
+        const candidatePoolPromptBlock = formatCandidatePoolForPrompt(
+          hybridCandidatePool,
+          {
+            selectedServices,
+            hasSteering,
+            hasCustomText: Boolean(effectivePreferences.customText?.trim()),
+            maxItems: 28,
+          }
+        );
 
         const isTasteProfileOnly =
           !hasSteering &&
@@ -1568,24 +2119,18 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
           selectedServices.length > 0
             ? ` HÅRT KRAV FÖR STREAMING: Samtliga ${candidateTargetCount} titlar MÅSTE finnas tillgängliga i Sverige på minst en av följande valda tjänster: ${selectedServices.join(
                 ", "
-              )}. Föreslå ALDRIG en titel som bara finns på andra streamingtjänster!${
-                sampleTitles
-                  ? ` Exempel på titlar som bekräftat finns på ${selectedServices.join(
-                      ", "
-                    )} i Sverige för dessa val: ${sampleTitles}. Du kan rekommendera från dessa eller andra titlar som du VET finns på ${selectedServices.join(
-                      ", "
-                    )} i Sverige.`
-                  : ""
-              }`
+              )}. Föreslå ALDRIG en titel som bara finns på andra streamingtjänster!`
             : ""
-        } Om användarens val tydligt pekar på en specifik titel (även om den redan är sedd), sätt den som #1 med isExactPinpointMatch: true. Annars ska du aldrig föreslå titlar som redan finns i sedda eller i watchlist. Svara ENDAST med en giltig JSON-array med ${candidateTargetCount} objekt.`;
+        }${candidatePoolPromptBlock} Om användarens val tydligt pekar på en specifik titel (även om den redan är sedd), sätt den som #1 med isExactPinpointMatch: true. Annars ska du aldrig föreslå titlar som redan finns i sedda eller i watchlist. Svara ENDAST med en giltig JSON-array med ${candidateTargetCount} objekt.`;
 
         try {
+          const dynamicTemp = resolveRecommendationTemperature(effectivePreferences);
           const rawText = await callGeminiWithFallback(ai, {
             contents: userPrompt,
             systemInstruction,
-            temperature: 0.85,
+            temperature: dynamicTemp,
             responseMimeType: "application/json",
+            responseSchema: RECOMMENDATIONS_RESPONSE_SCHEMA,
             label: "recommendations",
           });
 
@@ -1667,6 +2212,44 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
         effectivePreviousTitles
       ).slice(0, candidateTargetCount);
 
+      // Pre-hydrate AI picks that were selected from hybridCandidatePool with already-verified TMDB metadata
+      if (hybridCandidatePool.length > 0 && uniqueAiRecs.length > 0) {
+        const poolByNorm = new Map<string, MovieRecommendation>();
+        for (const p of hybridCandidatePool) {
+          const n1 = normalizeMovieTitle(p.title);
+          const n2 = p.originalTitle ? normalizeMovieTitle(p.originalTitle) : "";
+          if (n1 && !poolByNorm.has(n1)) poolByNorm.set(n1, p);
+          if (n2 && !poolByNorm.has(n2)) poolByNorm.set(n2, p);
+        }
+        uniqueAiRecs = uniqueAiRecs.map((rec) => {
+          const match =
+            poolByNorm.get(normalizeMovieTitle(rec.title)) ||
+            (rec.originalTitle
+              ? poolByNorm.get(normalizeMovieTitle(rec.originalTitle))
+              : undefined);
+          if (!match) return rec;
+          return {
+            ...rec,
+            tmdbId: rec.tmdbId || match.tmdbId,
+            posterPath: rec.posterPath || match.posterPath,
+            tmdbRating: rec.tmdbRating || match.tmdbRating,
+            swedishProviders:
+              rec.swedishProviders && rec.swedishProviders.providers.length > 0
+                ? rec.swedishProviders
+                : match.swedishProviders,
+            tmdbGenreIds: rec.tmdbGenreIds || match.tmdbGenreIds,
+            tmdbGenres: rec.tmdbGenres || match.tmdbGenres,
+            seasonCount: rec.seasonCount ?? match.seasonCount,
+            runtimeMinutes: rec.runtimeMinutes ?? match.runtimeMinutes,
+            episodeRuntimeMinutes:
+              rec.episodeRuntimeMinutes ?? match.episodeRuntimeMinutes,
+            tvStatus: rec.tvStatus ?? match.tvStatus,
+            originalLanguage: rec.originalLanguage || match.originalLanguage,
+            recommendedFromSeeds: match.recommendedFromSeeds,
+          };
+        });
+      }
+
       // Enrich AI candidates with TMDB metadata (including seasonCount, runtimeMinutes, tvStatus)
       const enrichedAiCandidates = await Promise.all(
         uniqueAiRecs.map((rec) => enrichRec(rec))
@@ -1674,9 +2257,14 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
 
       // Step 1: Verify AI candidates against official TMDB categories, release year, runtime & seasonCount
       let verifiedCandidates: MovieRecommendation[] =
-        filterAndVerifyMoviesByTmdbCategories(
-          enrichedAiCandidates,
-          verificationPreferences
+        limitAnimatedRecommendations(
+          filterAndVerifyMoviesByTmdbCategories(
+            enrichedAiCandidates,
+            verificationPreferences
+          ),
+          effectivePreferences,
+          1,
+          watchedMovies
         );
 
       // Step 1.5: Strictly filter out any candidates that match user's disliked categories
@@ -1697,30 +2285,32 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
 
       // Step 3: ONLY if fewer than requestedLimit AI candidates survived, top up with 100% verified titles
       if (verifiedCandidates.length < requestedLimit) {
-        // Priority 3A: Top up from TMDB Discovered pool (strictly verified against all rules)
-        if (discoveredPool.length > 0) {
+        // Priority 3A: Top up from Hybrid candidate pool (collaborative favorites + Discover, strictly verified)
+        const primaryTopUpPool =
+          hybridCandidatePool.length > 0 ? hybridCandidatePool : discoveredPool;
+        if (primaryTopUpPool.length > 0) {
           const existingTitles = new Set([
             ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
             ...watchlist.map((m) => normalizeMovieTitle(m.title)),
             ...verifiedCandidates.map((m) => normalizeMovieTitle(m.title)),
             ...(effectivePreviousTitles || []).map((t) => normalizeMovieTitle(t)),
           ]);
-          const unusedDiscovered = discoveredPool.filter((d) => {
+          const unusedPool = primaryTopUpPool.filter((d) => {
             const t1 = normalizeMovieTitle(d.title);
             const t2 = normalizeMovieTitle(d.originalTitle);
             return !existingTitles.has(t1) && !existingTitles.has(t2);
           });
-          let verifiedDiscovered = filterAndVerifyMoviesByTmdbCategories(
-            unusedDiscovered,
+          let verifiedPool = filterAndVerifyMoviesByTmdbCategories(
+            unusedPool,
             verificationPreferences
           );
           if (dislikedCategories.length > 0) {
-            verifiedDiscovered = filterOutDislikedCategories(
-              verifiedDiscovered,
+            verifiedPool = filterOutDislikedCategories(
+              verifiedPool,
               dislikedCategories
             );
           }
-          for (const cand of verifiedDiscovered) {
+          for (const cand of verifiedPool) {
             if (verifiedCandidates.length >= requestedLimit) break;
             verifiedCandidates.push(cand);
             existingTitles.add(normalizeMovieTitle(cand.title));
@@ -1890,7 +2480,12 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
           return true;
         });
       };
-      verifiedCandidates = dedupeVerified(verifiedCandidates, true);
+      verifiedCandidates = limitAnimatedRecommendations(
+        dedupeVerified(verifiedCandidates, true),
+        effectivePreferences,
+        1,
+        watchedMovies
+      );
 
       // If deduplication reduced count below requestedLimit, top up from remaining discoveredPool or fallbacks
       if (verifiedCandidates.length < requestedLimit) {
@@ -1905,7 +2500,9 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
             .map((m) => getMovieFranchiseKey(m.title, m.originalTitle))
             .filter(Boolean)
         );
-        for (const d of discoveredPool) {
+        const topUpSource =
+          hybridCandidatePool.length > 0 ? hybridCandidatePool : discoveredPool;
+        for (const d of topUpSource) {
           if (verifiedCandidates.length >= requestedLimit) break;
           const t1 = normalizeMovieTitle(d.title);
           const t2 = d.originalTitle ? normalizeMovieTitle(d.originalTitle) : "";
@@ -1939,7 +2536,12 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
             }
           }
         }
-        verifiedCandidates = dedupeVerified(verifiedCandidates, true);
+        verifiedCandidates = limitAnimatedRecommendations(
+        dedupeVerified(verifiedCandidates, true),
+        effectivePreferences,
+        1,
+        watchedMovies
+      );
       }
 
       const finalRecs = await Promise.all(
@@ -2037,27 +2639,41 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
 
       const ai = getGenAIClient();
       if (ai) {
-        const moviesText = watchedMovies
-          .map((m) => {
-            if (m.seasons && m.seasons.length > 0) {
-              return m.seasons
-                .map(
-                  (s) =>
-                    `- "${m.title} (Säsong ${s.seasonNumber})" (${s.rating}/5 stjärnor, ${
-                      s.liked ? "Gillade" : "Gillade inte"
-                    }): Taggar: [${(s.tags || []).join(", ")}]${
-                      s.thoughts ? ` | Tankar: "${s.thoughts}"` : ""
-                    }`
-                )
-                .join("\n");
-            }
-            return `- "${m.title}" (${m.rating}/5 stjärnor, ${
-              m.liked ? "Gillade" : "Gillade inte"
-            }): Taggar: [${(m.tags || []).join(", ")}]${
-              m.thoughts ? ` | Tankar: "${m.thoughts}"` : ""
-            }`;
-          })
-          .join("\n");
+        const formatWatchedForProfile = (m: WatchedMovie) => {
+          if (m.seasons && m.seasons.length > 0) {
+            return m.seasons
+              .map(
+                (s) =>
+                  `- "${m.title} (Säsong ${s.seasonNumber})" (${s.rating}/5 stjärnor, ${
+                    s.liked ? "Gillade" : "Gillade inte"
+                  }): Taggar: [${(s.tags || []).join(", ")}]${
+                    s.thoughts ? ` | Tankar: "${s.thoughts}"` : ""
+                  }`
+              )
+              .join("\n");
+          }
+          return `- "${m.title}" (${m.rating}/5 stjärnor, ${
+            m.liked ? "Gillade" : "Gillade inte"
+          }): Taggar: [${(m.tags || []).join(", ")}]${
+            m.thoughts ? ` | Tankar: "${m.thoughts}"` : ""
+          }`;
+        };
+
+        const isTvWatched = (m: WatchedMovie) =>
+          m.mediaType === "tv" ||
+          (m.seasons && m.seasons.length > 0) ||
+          (m.seasonCount && m.seasonCount > 0);
+        const movieEntries = watchedMovies.filter((m) => !isTvWatched(m));
+        const tvEntries = watchedMovies.filter((m) => isTvWatched(m));
+
+        const moviesText =
+          movieEntries.length > 0 && tvEntries.length > 0
+            ? `LÅNGFILMER:\n${movieEntries
+                .map(formatWatchedForProfile)
+                .join("\n")}\n\nTV-SERIER:\n${tvEntries
+                .map(formatWatchedForProfile)
+                .join("\n")}`
+            : watchedMovies.map(formatWatchedForProfile).join("\n");
 
         const prompt = `Analysera följande filmer/serier och kvaliteter som användaren har sett och betygsatt:
 ${moviesText}${
@@ -2073,13 +2689,15 @@ Skriv en träffsäker, personlig sammanfattning på svenska (3–4 meningar, dir
 2. Vad söker användaren i regi, ton, tempo och känsla?
 3. Om det finns titlar med lågt betyg (1–2 stjärnor / Gillade inte) eller uttryckligen ogillade kategorier, nämn tydligt vilken typ av stil, klichéer eller element användaren ogillar och vill undvika.
 4. OBSERVERA SÄSONGSBETYG: Om användaren har gett olika betyg på olika säsonger av samma serie (t.ex. Säsong 1 med 5 stjärnor och Säsong 2 med 2 stjärnor), behandla dem som separata omdömen och slå ALDRIG ihop dem till ett medelvärde. Fånga vad som gjorde favoritsäsongen stark kontra vad som brast i den svagare säsongen.
+5. FILM VS SERIER: Om användarens smak skiljer sig märkbart mellan långfilmer och TV-serier, fånga kort den skillnaden!
 Svara ENDAST med ett JSON-objekt på formatet: {"summary": "Din personliga sammanfattning här..."}`;
 
         try {
           const rawText = await callGeminiWithFallback(ai, {
             contents: prompt,
-            temperature: 0.7,
+            temperature: 0.65,
             responseMimeType: "application/json",
+            responseSchema: TASTE_PROFILE_RESPONSE_SCHEMA,
             label: "taste-profile",
           });
           if (rawText) {

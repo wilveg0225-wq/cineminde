@@ -6,19 +6,26 @@ import { RecommendedTab } from "./components/RecommendedTab";
 import { TonightTab } from "./components/TonightTab";
 import { WatchedTab } from "./components/WatchedTab";
 import { WatchlistTab } from "./components/WatchlistTab";
-import { TasteProfileTab } from "./components/TasteProfileTab";
+import { TasteProfileTab, CloudSyncStatus } from "./components/TasteProfileTab";
 import { RateMovieModal, RateMovieDraft } from "./components/RateMovieModal";
 import { AuthModal } from "./components/AuthModal";
+import {
+  TasteCalibrationModal,
+  TasteCalibrationResult,
+} from "./components/TasteCalibrationModal";
 import {
   subscribeToAuthChanges,
   loadOrInitializeUserCloudData,
   saveUserCloudData,
   subscribeToUserCloudData,
   logoutFirebaseUser,
+  isAdminResetTestAccount,
+  resetUserCloudData,
 } from "./utils/firebase";
 import {
   WatchedMovie,
   MovieRecommendation,
+  DismissedMovie,
   EveningPreferences,
   MovieSteeringContext,
   TmdbMovieEnrichment,
@@ -40,7 +47,21 @@ const STORAGE_KEYS = {
   RECOMMENDATIONS: "cineminde_recommendations",
   STREAMING_PROVIDERS: "cineminde_streaming_providers",
   DISLIKED_CATEGORIES: "cineminde_disliked_categories",
+  DISMISSED_MOVIES: "cineminde_dismissed_movies",
 };
+
+function loadInitialDismissedMovies(): DismissedMovie[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.DISMISSED_MOVIES);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((d) => d && typeof d.title === "string" && d.title.trim())
+      : [];
+  } catch {
+    return [];
+  }
+}
 
 function loadInitialDislikedCategories(): string[] {
   try {
@@ -148,14 +169,29 @@ function loadInitialTasteProfile(): string {
 function loadInitialRecommendations(
   watched: WatchedMovie[],
   watchlist: MovieRecommendation[],
-  dislikedCategories: string[] = []
+  dislikedCategories: string[] = [],
+  dismissedMovies: DismissedMovie[] = []
 ): MovieRecommendation[] {
+  const dismissedNorms = new Set(
+    (dismissedMovies || []).flatMap((d) => {
+      const n1 = normalizeMovieTitle(d.title);
+      const n2 = d.originalTitle ? normalizeMovieTitle(d.originalTitle) : "";
+      return n2 ? [n1, n2] : [n1];
+    })
+  );
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.RECOMMENDATIONS);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return enrichRecsWithCurated(parsed);
+        const filtered = (parsed as MovieRecommendation[]).filter((r) => {
+          const n1 = normalizeMovieTitle(r.title);
+          const n2 = r.originalTitle ? normalizeMovieTitle(r.originalTitle) : "";
+          return !dismissedNorms.has(n1) && (!n2 || !dismissedNorms.has(n2));
+        });
+        if (filtered.length > 0) {
+          return enrichRecsWithCurated(filtered);
+        }
       }
     }
   } catch {
@@ -171,7 +207,9 @@ function loadInitialRecommendations(
       frameworks: [],
       customText: "",
     },
-    dislikedCategories
+    dislikedCategories,
+    [],
+    dismissedMovies
   );
 }
 
@@ -187,8 +225,17 @@ export default function App() {
   const [dislikedCategories, setDislikedCategories] = useState<string[]>(
     loadInitialDislikedCategories
   );
+  const [dismissedMovies, setDismissedMovies] = useState<DismissedMovie[]>(
+    loadInitialDismissedMovies
+  );
   const [recommendations, setRecommendations] = useState<MovieRecommendation[]>(
-    () => loadInitialRecommendations(watchedMovies, watchlist, loadInitialDislikedCategories())
+    () =>
+      loadInitialRecommendations(
+        watchedMovies,
+        watchlist,
+        loadInitialDislikedCategories(),
+        loadInitialDismissedMovies()
+      )
   );
 
   const [preferences, setPreferences] = useState<EveningPreferences>(() => ({
@@ -207,10 +254,18 @@ export default function App() {
   const [seenTonightTitles, setSeenTonightTitles] = useState<string[]>([]);
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   const [rateDraft, setRateDraft] = useState<RateMovieDraft | null>(null);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastState, setToastState] = useState<{
+    message: string;
+    undoLabel?: string;
+    onUndo?: () => void;
+  } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<CloudSyncStatus>("synced");
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
+  const enrichedKeysRef = useRef<Set<string>>(new Set());
   const isCloudHydratedRef = useRef(false);
   const skipNextCloudSaveRef = useRef(false);
   const watchedMoviesRef = useRef(watchedMovies);
@@ -221,6 +276,8 @@ export default function App() {
   tasteProfileSummaryRef.current = tasteProfileSummary;
   const dislikedCategoriesRef = useRef(dislikedCategories);
   dislikedCategoriesRef.current = dislikedCategories;
+  const dismissedMoviesRef = useRef(dismissedMovies);
+  dismissedMoviesRef.current = dismissedMovies;
   const recsAbortControllerRef = useRef<AbortController | null>(null);
 
   // Firebase Auth & Real-time Firestore Cloud Sync
@@ -240,13 +297,88 @@ export default function App() {
         return;
       }
 
+      const isAdminReset = isAdminResetTestAccount(user.email);
+      if (isAdminReset) {
+        const sessionKey = `cineminde_admin_session_reset_${user.uid}`;
+        let alreadyResetThisSession = false;
+        try {
+          alreadyResetThisSession = sessionStorage.getItem(sessionKey) === "1";
+        } catch {
+          alreadyResetThisSession = false;
+        }
+
+        if (!alreadyResetThisSession) {
+          try {
+            sessionStorage.setItem(sessionKey, "1");
+          } catch {
+            // Ignore sessionStorage errors
+          }
+          const emptySummary = generateSmartFallbackTasteProfile([], []);
+          skipNextCloudSaveRef.current = true;
+          try {
+            localStorage.removeItem("cineminde_recommended_deck");
+            localStorage.removeItem("cineminde_recommended_seen_titles");
+            localStorage.removeItem(STORAGE_KEYS.RECOMMENDATIONS);
+            localStorage.removeItem(STORAGE_KEYS.STREAMING_PROVIDERS);
+            localStorage.setItem(STORAGE_KEYS.WATCHED, "[]");
+            localStorage.setItem(STORAGE_KEYS.WATCHLIST, "[]");
+            localStorage.setItem(STORAGE_KEYS.DISLIKED_CATEGORIES, "[]");
+            localStorage.setItem(STORAGE_KEYS.DISMISSED_MOVIES, "[]");
+            localStorage.setItem(STORAGE_KEYS.TASTE_PROFILE, emptySummary);
+          } catch {
+            // Ignore storage errors
+          }
+          setWatchedMovies([]);
+          setWatchlist([]);
+          setDislikedCategories([]);
+          setDismissedMovies([]);
+          setTasteProfileSummary(emptySummary);
+          setPreferences({
+            moods: [],
+            genres: [],
+            contents: [],
+            frameworks: [],
+            customText: "",
+            streamingProviders: [],
+          });
+          setActiveSteering(null);
+          setSeenTonightTitles([]);
+          setRecommendations(
+            generateSmartFallbackRecommendations(
+              [],
+              [],
+              { moods: [], genres: [], contents: [], frameworks: [], customText: "" },
+              []
+            )
+          );
+          showToast(
+            "Admin-testkonto inloggat – profilen är helt nollställd för test!"
+          );
+          try {
+            await resetUserCloudData(user.uid);
+            setCloudSyncStatus("synced");
+          } catch {
+            // Local reset is already applied even if Firestore rules/network fail
+            setCloudSyncStatus("error");
+          }
+        } else {
+          // Page reload within the same admin test session: preserve local test state
+          // so persistence across F5 can be verified cleanly.
+          setCloudSyncStatus("local_only");
+        }
+        isCloudHydratedRef.current = true;
+        return;
+      }
+
       try {
         const cloudData = await loadOrInitializeUserCloudData(user.uid, {
           watchedMovies: watchedMoviesRef.current,
           watchlist: watchlistRef.current,
           tasteProfileSummary: tasteProfileSummaryRef.current,
           dislikedCategories: dislikedCategoriesRef.current,
+          dismissedMovies: dismissedMoviesRef.current,
         });
+        setCloudSyncStatus("synced");
         skipNextCloudSaveRef.current = true;
         setWatchedMovies(enrichWatchedWithCurated(cloudData.watchedMovies));
         setWatchlist(enrichRecsWithCurated(cloudData.watchlist));
@@ -254,19 +386,34 @@ export default function App() {
         if (Array.isArray(cloudData.dislikedCategories)) {
           setDislikedCategories(cloudData.dislikedCategories);
         }
+        if (Array.isArray(cloudData.dismissedMovies)) {
+          setDismissedMovies(cloudData.dismissedMovies);
+        }
         isCloudHydratedRef.current = true;
 
-        unsubscribeSnapshot = subscribeToUserCloudData(user.uid, (liveData) => {
-          skipNextCloudSaveRef.current = true;
-          setWatchedMovies(enrichWatchedWithCurated(liveData.watchedMovies));
-          setWatchlist(enrichRecsWithCurated(liveData.watchlist));
-          setTasteProfileSummary(liveData.tasteProfileSummary);
-          if (Array.isArray(liveData.dislikedCategories)) {
-            setDislikedCategories(liveData.dislikedCategories);
+        unsubscribeSnapshot = subscribeToUserCloudData(
+          user.uid,
+          (liveData) => {
+            setCloudSyncStatus("synced");
+            skipNextCloudSaveRef.current = true;
+            setWatchedMovies(enrichWatchedWithCurated(liveData.watchedMovies));
+            setWatchlist(enrichRecsWithCurated(liveData.watchlist));
+            setTasteProfileSummary(liveData.tasteProfileSummary);
+            if (Array.isArray(liveData.dislikedCategories)) {
+              setDislikedCategories(liveData.dislikedCategories);
+            }
+            if (Array.isArray(liveData.dismissedMovies)) {
+              setDismissedMovies(liveData.dismissedMovies);
+            }
+          },
+          () => {
+            setCloudSyncStatus("error");
           }
-        });
+        );
       } catch {
-        // Fallback to local state if Firestore is not yet enabled
+        // Fallback to local state if Firestore rules or network deny access
+        setCloudSyncStatus("error");
+        isCloudHydratedRef.current = true;
       }
     });
 
@@ -288,8 +435,16 @@ export default function App() {
       watchlist,
       tasteProfileSummary,
       dislikedCategories,
-    });
-  }, [watchedMovies, watchlist, tasteProfileSummary, dislikedCategories, currentUser]);
+      dismissedMovies,
+    })
+      .then(() => {
+        setCloudSyncStatus((prev) => (prev === "error" ? "synced" : prev));
+      })
+      .catch(() => {
+        // Gracefully degrade to localStorage without unhandled promise rejection
+        setCloudSyncStatus("error");
+      });
+  }, [watchedMovies, watchlist, tasteProfileSummary, dislikedCategories, dismissedMovies, currentUser]);
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: "instant" });
@@ -313,6 +468,17 @@ export default function App() {
       // Ignore storage quota errors
     }
   }, [dislikedCategories]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEYS.DISMISSED_MOVIES,
+        JSON.stringify(dismissedMovies.slice(-150))
+      );
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [dismissedMovies]);
 
   useEffect(() => {
     try {
@@ -352,37 +518,46 @@ export default function App() {
     }
   }, [preferences.streamingProviders]);
 
-  // Background TMDB enrichment for already saved movies in Watched, Watchlist, and Recommendations
+  // Background TMDB enrichment for movies in Watched, Watchlist, and Recommendations
+  // Runs only after login so we never fire aborted requests on the auth screen,
+  // and automatically fills in missing posters (e.g. after admin reset or fallback load).
   useEffect(() => {
+    if (!currentUser) return;
     let cancelled = false;
     const runBackgroundEnrichment = async () => {
-      const titlesToEnrich = new Map<string, { title: string; year?: string }>();
-      for (const w of watchedMovies) {
-        if (!w.posterPath || !w.swedishProviders || !w.ageRating) {
-          titlesToEnrich.set(normalizeMovieTitle(w.title), {
-            title: w.originalTitle || w.title,
-            year: w.year,
-          });
+      const titlesToEnrich = new Map<
+        string,
+        { title: string; year?: string; mediaType?: "movie" | "tv" }
+      >();
+      const queueIfMissing = (item: {
+        title: string;
+        originalTitle?: string;
+        year?: string;
+        mediaType?: "movie" | "tv";
+        posterPath?: string;
+        swedishProviders?: unknown;
+        ageRating?: string;
+      }) => {
+        if (!item.posterPath || !item.swedishProviders || !item.ageRating) {
+          const norm = normalizeMovieTitle(item.title);
+          if (norm && !enrichedKeysRef.current.has(norm)) {
+            titlesToEnrich.set(norm, {
+              title: item.originalTitle || item.title,
+              year: item.year,
+              mediaType: item.mediaType,
+            });
+          }
         }
-      }
-      for (const wl of watchlist) {
-        if (!wl.posterPath || !wl.swedishProviders || !wl.ageRating) {
-          titlesToEnrich.set(normalizeMovieTitle(wl.title), {
-            title: wl.originalTitle || wl.title,
-            year: wl.year,
-          });
-        }
-      }
-      for (const r of recommendations) {
-        if (!r.posterPath || !r.swedishProviders || !r.ageRating) {
-          titlesToEnrich.set(normalizeMovieTitle(r.title), {
-            title: r.originalTitle || r.title,
-            year: r.year,
-          });
-        }
-      }
+      };
+
+      for (const w of watchedMovies) queueIfMissing(w);
+      for (const wl of watchlist) queueIfMissing(wl);
+      for (const r of recommendations) queueIfMissing(r);
 
       if (titlesToEnrich.size === 0) return;
+      for (const norm of titlesToEnrich.keys()) {
+        enrichedKeysRef.current.add(norm);
+      }
 
       try {
         const storedTmdbKey = localStorage.getItem("tmdbApiKey") || "";
@@ -467,21 +642,37 @@ export default function App() {
           })
         );
       } catch {
-        // Ignore background enrichment errors
+        // Allow retry if network failed
+        for (const norm of titlesToEnrich.keys()) {
+          enrichedKeysRef.current.delete(norm);
+        }
       }
     };
 
-    runBackgroundEnrichment();
+    void runBackgroundEnrichment();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [currentUser, watchedMovies, watchlist, recommendations]);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage((current) => (current === msg ? null : current));
-    }, 3000);
+  const showToast = (
+    msg: string,
+    action?: { undoLabel: string; onUndo: () => void }
+  ) => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+    setToastState({
+      message: msg,
+      undoLabel: action?.undoLabel,
+      onUndo: action?.onUndo,
+    });
+    toastTimerRef.current = setTimeout(
+      () => {
+        setToastState((current) => (current?.message === msg ? null : current));
+      },
+      action ? 5500 : 3200
+    );
   };
 
   const fetchTonightRecommendations = async (
@@ -537,6 +728,7 @@ export default function App() {
           tasteProfileSummary,
           preferences: effectivePreferences,
           dislikedCategories,
+          dismissedMovies,
           previousTitles: allPrevious,
         }),
       });
@@ -571,7 +763,8 @@ export default function App() {
             watchlist,
             effectivePreferences,
             dislikedCategories,
-            allPrevious
+            allPrevious,
+            dismissedMovies
           );
           setRecommendations(fallback);
         }
@@ -581,7 +774,8 @@ export default function App() {
           watchlist,
           effectivePreferences,
           dislikedCategories,
-          allPrevious
+          allPrevious,
+          dismissedMovies
         );
         setRecommendations(fallback);
       }
@@ -600,7 +794,8 @@ export default function App() {
         watchlist,
         effectivePreferences,
         dislikedCategories,
-        allPrevious
+        allPrevious,
+        dismissedMovies
       );
       setRecommendations(fallback);
     } finally {
@@ -616,6 +811,75 @@ export default function App() {
 
   const handleSteerFromMovie = async (steering: MovieSteeringContext) => {
     await fetchTonightRecommendations(steering);
+  };
+
+  const handleDismissMovie = (movie: MovieRecommendation, removeFromTonight = false) => {
+    const norm = normalizeMovieTitle(movie.title);
+    if (!norm) return;
+    setDismissedMovies((prev) => {
+      const filtered = prev.filter((d) => normalizeMovieTitle(d.title) !== norm);
+      return [
+        ...filtered,
+        {
+          title: movie.title,
+          originalTitle: movie.originalTitle,
+          tmdbId: movie.tmdbId,
+          mediaType: movie.mediaType,
+          tmdbGenres: movie.tmdbGenres,
+          vibeTags: movie.vibeTags,
+          dismissedAt: new Date().toISOString(),
+        },
+      ].slice(-150);
+    });
+    if (removeFromTonight) {
+      const originalIndex = recommendations.findIndex(
+        (r) => normalizeMovieTitle(r.title) === norm
+      );
+      setRecommendations((prev) =>
+        prev.filter((r) => normalizeMovieTitle(r.title) !== norm)
+      );
+      showToast(`"${movie.title}" gömdes – vi styr bort från liknande.`, {
+        undoLabel: "Ångra",
+        onUndo: () => {
+          setDismissedMovies((prev) =>
+            prev.filter((d) => normalizeMovieTitle(d.title) !== norm)
+          );
+          setRecommendations((prev) => {
+            if (prev.some((r) => normalizeMovieTitle(r.title) === norm)) {
+              return prev;
+            }
+            const copy = [...prev];
+            const insertAt =
+              originalIndex >= 0 ? Math.min(originalIndex, copy.length) : 0;
+            copy.splice(insertAt, 0, movie);
+            return copy;
+          });
+          setToastState(null);
+        },
+      });
+    }
+  };
+
+  const handleRestoreDismissedMovie = (movie: MovieRecommendation) => {
+    const norm = normalizeMovieTitle(movie.title);
+    if (!norm) return;
+    setDismissedMovies((prev) =>
+      prev.filter((d) => normalizeMovieTitle(d.title) !== norm)
+    );
+  };
+
+  const handleRestoreDismissedByTitle = (title: string) => {
+    const norm = normalizeMovieTitle(title);
+    if (!norm) return;
+    setDismissedMovies((prev) =>
+      prev.filter((d) => normalizeMovieTitle(d.title) !== norm)
+    );
+    showToast(`"${title}" återställdes och kan rekommenderas igen.`);
+  };
+
+  const handleClearDismissedMovies = () => {
+    setDismissedMovies([]);
+    showToast("Alla bortvalda förslag har rensats.");
   };
 
   const handleAddToWatchlist = async (movie: MovieRecommendation) => {
@@ -773,6 +1037,69 @@ export default function App() {
     void refreshTasteProfileInBackground(watchedMovies, updated);
   };
 
+  const handleCompleteCalibration = (result: TasteCalibrationResult) => {
+    setIsCalibrationOpen(false);
+    const { watched: newWatchedEntries, dismissed: newDismissedEntries } = result;
+
+    const existingWatchedNorms = new Set(
+      watchedMovies.map((m) => normalizeMovieTitle(m.title))
+    );
+    const uniqueNewWatched = (newWatchedEntries || []).filter(
+      (m) => !existingWatchedNorms.has(normalizeMovieTitle(m.title))
+    );
+
+    const existingDismissedNorms = new Set(
+      dismissedMovies.map((d) => normalizeMovieTitle(d.title))
+    );
+    const uniqueNewDismissed = (newDismissedEntries || []).filter(
+      (d) =>
+        !existingDismissedNorms.has(normalizeMovieTitle(d.title)) &&
+        !existingWatchedNorms.has(normalizeMovieTitle(d.title))
+    );
+
+    if (uniqueNewWatched.length === 0 && uniqueNewDismissed.length === 0) return;
+
+    const updatedWatched =
+      uniqueNewWatched.length > 0
+        ? [...uniqueNewWatched, ...watchedMovies]
+        : watchedMovies;
+    if (uniqueNewWatched.length > 0) {
+      setWatchedMovies(updatedWatched);
+    }
+
+    if (uniqueNewDismissed.length > 0) {
+      setDismissedMovies((prev) => [...prev, ...uniqueNewDismissed].slice(-150));
+    }
+
+    const removedFromRecsNorms = new Set([
+      ...uniqueNewWatched.map((m) => normalizeMovieTitle(m.title)),
+      ...uniqueNewDismissed.map((d) => normalizeMovieTitle(d.title)),
+    ]);
+    const watchedNorms = new Set(
+      uniqueNewWatched.map((m) => normalizeMovieTitle(m.title))
+    );
+    if (watchedNorms.size > 0) {
+      setWatchlist((prev) =>
+        prev.filter((w) => !watchedNorms.has(normalizeMovieTitle(w.title)))
+      );
+    }
+    setRecommendations((prev) =>
+      prev.filter((r) => !removedFromRecsNorms.has(normalizeMovieTitle(r.title)))
+    );
+
+    const parts: string[] = [];
+    if (uniqueNewWatched.length > 0) {
+      parts.push(`${uniqueNewWatched.length} betyg sparade`);
+    }
+    if (uniqueNewDismissed.length > 0) {
+      parts.push(`${uniqueNewDismissed.length} bortvalda`);
+    }
+    showToast(`Kalibrering sparad (${parts.join(", ")}) – smakprofilen uppdateras!`);
+    if (uniqueNewWatched.length > 0) {
+      void refreshTasteProfileInBackground(updatedWatched, dislikedCategories);
+    }
+  };
+
   const handleSaveWatchedMovie = (
     movieData: Omit<WatchedMovie, "id" | "addedAt">,
     existingId?: string,
@@ -860,10 +1187,66 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    if (currentUser) {
+      try {
+        sessionStorage.removeItem(`cineminde_admin_session_reset_${currentUser.uid}`);
+      } catch {
+        // Ignore storage errors
+      }
+    }
     await logoutFirebaseUser();
     setCurrentUser(null);
     isCloudHydratedRef.current = false;
     showToast("Du har loggat ut");
+  };
+
+  const handleResetAdminTestAccount = async () => {
+    if (!currentUser || !isAdminResetTestAccount(currentUser.email)) return;
+    const emptySummary = generateSmartFallbackTasteProfile([], []);
+    skipNextCloudSaveRef.current = true;
+    enrichedKeysRef.current.clear();
+    try {
+      localStorage.removeItem("cineminde_recommended_deck");
+      localStorage.removeItem("cineminde_recommended_seen_titles");
+      localStorage.removeItem(STORAGE_KEYS.RECOMMENDATIONS);
+      localStorage.removeItem(STORAGE_KEYS.STREAMING_PROVIDERS);
+      localStorage.setItem(STORAGE_KEYS.WATCHED, "[]");
+      localStorage.setItem(STORAGE_KEYS.WATCHLIST, "[]");
+      localStorage.setItem(STORAGE_KEYS.DISLIKED_CATEGORIES, "[]");
+      localStorage.setItem(STORAGE_KEYS.DISMISSED_MOVIES, "[]");
+      localStorage.setItem(STORAGE_KEYS.TASTE_PROFILE, emptySummary);
+    } catch {
+      // Ignore storage errors
+    }
+    setWatchedMovies([]);
+    setWatchlist([]);
+    setDislikedCategories([]);
+    setDismissedMovies([]);
+    setTasteProfileSummary(emptySummary);
+    setPreferences({
+      moods: [],
+      genres: [],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      streamingProviders: [],
+    });
+    setActiveSteering(null);
+    setSeenTonightTitles([]);
+    setRecommendations(
+      generateSmartFallbackRecommendations(
+        [],
+        [],
+        { moods: [], genres: [], contents: [], frameworks: [], customText: "" },
+        []
+      )
+    );
+    showToast("Admin-testkontot är nu helt nollställt!");
+    try {
+      await resetUserCloudData(currentUser.uid);
+    } catch {
+      // Local reset already succeeded
+    }
   };
 
   if (!isAuthReady) {
@@ -885,12 +1268,12 @@ export default function App() {
           standalone={true}
           onAuthSuccess={(msg) => showToast(msg)}
         />
-        {toastMessage && (
+        {toastState && (
           <div
             role="status"
             className="fixed top-[calc(env(safe-area-inset-top,0px)+1rem)] left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl bg-[#1e1e24] border border-white/[0.15] text-xs font-medium text-white shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2 duration-200"
           >
-            <span>{toastMessage}</span>
+            <span>{toastState.message}</span>
           </div>
         )}
       </>
@@ -927,13 +1310,22 @@ export default function App() {
         </header>
 
         {/* Feedback Toast Banner */}
-        {toastMessage && (
+        {toastState && (
           <div
             role="status"
             aria-live="polite"
-            className="mb-4 px-4 py-2.5 rounded-xl bg-[#16161a] border border-[#f59e0b]/40 text-xs font-medium text-[#f59e0b] text-center shadow-lg"
+            className="mb-4 px-4 py-2.5 rounded-xl bg-[#16161a] border border-[#f59e0b]/40 text-xs font-medium text-[#f59e0b] shadow-lg flex items-center justify-between gap-3"
           >
-            {toastMessage}
+            <span className="flex-1 text-center">{toastState.message}</span>
+            {toastState.onUndo && toastState.undoLabel && (
+              <button
+                type="button"
+                onClick={toastState.onUndo}
+                className="px-2.5 py-1 rounded-lg bg-[#f59e0b]/20 hover:bg-[#f59e0b]/30 border border-[#f59e0b]/50 text-[11px] font-bold text-amber-200 shrink-0 cursor-pointer transition-colors"
+              >
+                {toastState.undoLabel}
+              </button>
+            )}
           </div>
         )}
 
@@ -945,8 +1337,11 @@ export default function App() {
               watchlist={watchlist}
               tasteProfileSummary={tasteProfileSummary}
               dislikedCategories={dislikedCategories}
+              dismissedMovies={dismissedMovies}
               onAddToWatchlist={handleAddToWatchlist}
               onMarkAsWatched={handleOpenRateFromRecommendation}
+              onDismissMovie={(m) => handleDismissMovie(m, false)}
+              onRestoreDismissedMovie={handleRestoreDismissedMovie}
               onGoToWatchlist={() => setActiveTab("watchlist")}
             />
           )}
@@ -964,6 +1359,7 @@ export default function App() {
               onClearSteering={() => setActiveSteering(null)}
               onAddToWatchlist={handleAddToWatchlist}
               onMarkAsWatched={handleOpenRateFromRecommendation}
+              onDismissMovie={(m) => handleDismissMovie(m, true)}
               watchlist={watchlist}
               watchedMovies={watchedMovies}
               watchedCount={watchedMovies.length}
@@ -994,11 +1390,18 @@ export default function App() {
               watchlist={watchlist}
               tasteProfileSummary={tasteProfileSummary}
               dislikedCategories={dislikedCategories}
+              dismissedMovies={dismissedMovies}
               onAddDislikedCategory={handleAddDislikedCategory}
               onRemoveDislikedCategory={handleRemoveDislikedCategory}
+              onRestoreDismissedByTitle={handleRestoreDismissedByTitle}
+              onClearDismissedMovies={handleClearDismissedMovies}
               isUpdatingProfile={isUpdatingProfile}
               currentUser={currentUser}
+              cloudSyncStatus={cloudSyncStatus}
+              isAdminTestAccount={isAdminResetTestAccount(currentUser?.email)}
+              onResetAdminTestAccount={handleResetAdminTestAccount}
               onOpenAuthModal={() => setIsAuthModalOpen(true)}
+              onOpenCalibration={() => setIsCalibrationOpen(true)}
               onLogout={handleLogout}
             />
           )}
@@ -1018,6 +1421,15 @@ export default function App() {
         draft={rateDraft}
         onClose={() => setRateDraft(null)}
         onSave={handleSaveWatchedMovie}
+      />
+
+      {/* Quick 30-second Taste Calibration Modal */}
+      <TasteCalibrationModal
+        isOpen={isCalibrationOpen}
+        watchedMovies={watchedMovies}
+        dismissedMovies={dismissedMovies}
+        onClose={() => setIsCalibrationOpen(false)}
+        onComplete={handleCompleteCalibration}
       />
 
       {/* Firebase Account Login & Cloud Sync Modal */}

@@ -1,0 +1,130 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// Collection: users
+// Document ID: {userId} (must match Firebase Auth request.auth.uid)
+// Fields:
+//   - watchedMovies: list (required, max 1000 items) - array of WatchedMovie objects
+//   - watchlist: list (required, max 500 items) - array of MovieRecommendation objects
+//   - tasteProfileSummary: string (required, 0..5000 chars) - personalized taste profile summary
+//   - dislikedCategories: list (optional, max 100 items) - array of disliked category strings
+//   - dismissedMovies: list (optional, max 200 items) - array of DismissedMovie objects
+//   - updatedAt: string (required, max 64 chars, ISO 8601 UTC timestamp) - last sync timestamp
+//
+// Access Pattern:
+//   - Strictly single-user private data: each authenticated user can only
+//     read (get) and write (create, update) their own /users/{userId} document.
+//   - Listing /users, deleting /users/{userId}, and accessing any other
+//     collection or subcollection are denied by default.
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the authenticated user owns the document path
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Validate that the document contains only the allowed fields
+    function hasOnlyAllowedFields(data, fields) {
+      return data.keys().hasOnly(fields);
+    }
+
+    // Validate that all required fields are present
+    function hasRequiredFields(data, fields) {
+      return data.keys().hasAll(fields);
+    }
+
+    // Validate that a field is a string within [minLen, maxLen]
+    function isValidString(value, minLen, maxLen) {
+      return value is string &&
+        value.size() >= minLen &&
+        value.size() <= maxLen;
+    }
+
+    // Validate ISO 8601 UTC date string format (e.g. from Date.prototype.toISOString())
+    // Note: validates format only, not calendar logic.
+    function isValidDateString(dateStr) {
+      return isValidString(dateStr, 20, 64) &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$");
+    }
+
+    // Validate that a value is a list within maxSize
+    function isValidList(value, maxSize) {
+      return value is list && value.size() <= maxSize;
+    }
+
+    // Validate an optional list field (either omitted or a list within maxSize)
+    function isValidOptionalList(data, field, maxSize) {
+      return !(field in data) || isValidList(data[field], maxSize);
+    }
+
+    // ===============================================================
+    // Domain Validators (used in BOTH create and update)
+    // ===============================================================
+
+    function isValidUserCloudData(data) {
+      return hasOnlyAllowedFields(data, [
+          'watchedMovies',
+          'watchlist',
+          'tasteProfileSummary',
+          'dislikedCategories',
+          'dismissedMovies',
+          'updatedAt'
+        ]) &&
+        hasRequiredFields(data, [
+          'watchedMovies',
+          'watchlist',
+          'tasteProfileSummary',
+          'updatedAt'
+        ]) &&
+        isValidList(data.watchedMovies, 1000) &&
+        isValidList(data.watchlist, 500) &&
+        isValidString(data.tasteProfileSummary, 0, 5000) &&
+        isValidOptionalList(data, 'dislikedCategories', 100) &&
+        isValidOptionalList(data, 'dismissedMovies', 200) &&
+        isValidDateString(data.updatedAt);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      // Allow authenticated owner to read their own document (getDoc / onSnapshot)
+      allow get: if isOwner(userId);
+
+      // Explicitly deny listing/enumerating the users collection
+      allow list: if false;
+
+      // Allow authenticated owner to create and update their own document
+      // Supports both setDoc(..., { merge: true }) and setDoc(..., { merge: false })
+      allow create: if isOwner(userId) && isValidUserCloudData(request.resource.data);
+      allow update: if isOwner(userId) && isValidUserCloudData(request.resource.data);
+
+      // App resets user data by overwriting with empty arrays rather than deleting
+      allow delete: if false;
+    }
+
+    // Default deny for all other collections and subcollections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

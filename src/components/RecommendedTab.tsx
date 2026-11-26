@@ -19,6 +19,7 @@ import {
 import {
   MovieRecommendation,
   WatchedMovie,
+  DismissedMovie,
   getTmdbPosterUrl,
   normalizeMovieTitle,
   lookupCuratedTmdbMovie,
@@ -35,8 +36,11 @@ interface RecommendedTabProps {
   watchlist: MovieRecommendation[];
   tasteProfileSummary: string;
   dislikedCategories?: string[];
+  dismissedMovies?: DismissedMovie[];
   onAddToWatchlist: (movie: MovieRecommendation) => void;
   onMarkAsWatched: (movie: MovieRecommendation) => void;
+  onDismissMovie?: (movie: MovieRecommendation) => void;
+  onRestoreDismissedMovie?: (movie: MovieRecommendation) => void;
   onGoToWatchlist: () => void;
 }
 
@@ -85,8 +89,11 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
   watchlist,
   tasteProfileSummary,
   dislikedCategories = [],
+  dismissedMovies = [],
   onAddToWatchlist,
   onMarkAsWatched,
+  onDismissMovie,
+  onRestoreDismissedMovie,
   onGoToWatchlist,
 }) => {
   const [deck, setDeck] = useState<MovieRecommendation[]>(loadStoredDeck);
@@ -99,9 +106,11 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
   const [error, setRecsError] = useState<string | null>(null);
   const [showFullInfo, setShowFullInfo] = useState(false);
 
-  // Keep ref synchronized to always read the freshest seen set inside callbacks
+  // Keep refs synchronized to always read the freshest state inside callbacks
   const seenTitlesRef = useRef(seenTitles);
   seenTitlesRef.current = seenTitles;
+  const dismissedMoviesRef = useRef(dismissedMovies);
+  dismissedMoviesRef.current = dismissedMovies;
 
   // Persist deck so user picks up right where they left off without restarting
   useEffect(() => {
@@ -184,6 +193,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
             watchlist,
             tasteProfileSummary,
             dislikedCategories,
+            dismissedMovies: dismissedMoviesRef.current,
             preferences: {
               moods: [],
               genres: [],
@@ -321,6 +331,8 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
     setTimeout(() => {
       if (direction === "like") {
         onAddToWatchlist(currentCard);
+      } else {
+        onDismissMovie?.(currentCard);
       }
 
       setHistory((prev) => [
@@ -350,6 +362,9 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
   const handleRestoreFromHistory = (index: number) => {
     const target = history[index];
     if (!target) return;
+    if (target.action === "skip") {
+      onRestoreDismissedMovie?.(target.movie);
+    }
     setHistory((prev) => prev.filter((_, idx) => idx !== index));
     setDeck((prev) => [
       target.movie,
@@ -363,6 +378,9 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
   const handleUndo = () => {
     if (history.length === 0 || swipingCard) return;
     const last = history[history.length - 1];
+    if (last.action === "skip") {
+      onRestoreDismissedMovie?.(last.movie);
+    }
     setHistory((prev) => prev.slice(0, -1));
     setDeck((prev) => [last.movie, ...prev]);
     setDragX(0);
@@ -434,7 +452,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
   };
 
   return (
-    <div className="space-y-4 max-w-sm mx-auto select-none">
+    <div className="space-y-2.5 max-w-sm mx-auto select-none">
       {/* Header */}
       <div className="flex items-center justify-between px-1">
         <div>
@@ -466,9 +484,9 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
       </div>
 
       {/* Main Tinder Card Deck Area */}
-      <div className="relative min-h-[530px] w-full flex items-center justify-center">
+      <div className="relative min-h-[min(405px,calc(100dvh-370px))] w-full flex items-center justify-center">
         {isLoading && deck.length === 0 ? (
-          <div className="w-full h-[520px] rounded-3xl bg-[#16161a] border border-white/[0.08] p-6 flex flex-col items-center justify-center text-center space-y-4 animate-pulse">
+          <div className="w-full h-[min(395px,calc(100dvh-375px))] min-h-[295px] rounded-3xl bg-[#16161a] border border-white/[0.08] p-6 flex flex-col items-center justify-center text-center space-y-4 animate-pulse">
             <div className="w-16 h-16 rounded-2xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center">
               <Sparkles className="w-8 h-8 text-[#e11d48] animate-spin" />
             </div>
@@ -544,7 +562,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
             </div>
           </div>
         ) : (
-          <div className="relative w-full h-[520px]">
+          <div className="relative w-full h-[min(395px,calc(100dvh-375px))] min-h-[295px]">
             {/* Background Card (Peek) */}
             {nextCard && (
               <div
@@ -684,31 +702,33 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
                       <span className="text-[10px] uppercase font-bold tracking-wider text-[#e11d48]">
                         Varför du gillar den
                       </span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setShowFullInfo(!showFullInfo);
-                        }}
-                        className="text-[10px] text-zinc-400 hover:text-white inline-flex items-center gap-0.5 cursor-pointer"
-                      >
-                        {showFullInfo ? (
-                          <>
-                            <span>Mindre</span>
-                            <ChevronUp className="w-3 h-3" />
-                          </>
-                        ) : (
-                          <>
-                            <span>Mer</span>
-                            <ChevronDown className="w-3 h-3" />
-                          </>
-                        )}
-                      </button>
+                      {currentCard.whyYouWillLikeIt.length > 140 && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowFullInfo(!showFullInfo);
+                          }}
+                          className="text-[10px] text-zinc-400 hover:text-white inline-flex items-center gap-0.5 cursor-pointer"
+                        >
+                          {showFullInfo ? (
+                            <>
+                              <span>Mindre</span>
+                              <ChevronUp className="w-3 h-3" />
+                            </>
+                          ) : (
+                            <>
+                              <span>Mer</span>
+                              <ChevronDown className="w-3 h-3" />
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
 
                     <p
-                      className={`text-xs text-zinc-300 leading-relaxed ${
-                        showFullInfo ? "" : "line-clamp-2"
+                      className={`text-xs text-zinc-300 leading-snug ${
+                        showFullInfo ? "" : "line-clamp-3"
                       }`}
                     >
                       {currentCard.whyYouWillLikeIt}
@@ -770,9 +790,9 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
             disabled={Boolean(swipingCard)}
             aria-label="Hoppa över titel"
             title="Hoppa över"
-            className="w-16 h-16 rounded-full bg-[#1e1418] border border-rose-500/40 text-rose-400 hover:text-rose-300 hover:border-rose-500/80 hover:bg-rose-950/40 disabled:opacity-50 flex items-center justify-center transition-transform active:scale-95 shadow-lg shadow-rose-950/30 cursor-pointer"
+            className="w-14 h-14 rounded-full bg-[#1e1418] border border-rose-500/40 text-rose-400 hover:text-rose-300 hover:border-rose-500/80 hover:bg-rose-950/40 disabled:opacity-50 flex items-center justify-center transition-transform active:scale-95 shadow-lg shadow-rose-950/30 cursor-pointer"
           >
-            <X className="w-8 h-8 stroke-[2.5]" />
+            <X className="w-7 h-7 stroke-[2.5]" />
           </button>
 
           {/* Swipe Right (Save / Like) */}
@@ -782,9 +802,9 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
             disabled={Boolean(swipingCard)}
             aria-label="Spara till Watchlist"
             title="Spara till Watchlist"
-            className="w-16 h-16 rounded-full bg-[#121f18] border border-emerald-500/40 text-emerald-400 hover:text-emerald-300 hover:border-emerald-500/80 hover:bg-emerald-950/40 disabled:opacity-50 flex items-center justify-center transition-transform active:scale-95 shadow-lg shadow-emerald-950/30 cursor-pointer"
+            className="w-14 h-14 rounded-full bg-[#121f18] border border-emerald-500/40 text-emerald-400 hover:text-emerald-300 hover:border-emerald-500/80 hover:bg-emerald-950/40 disabled:opacity-50 flex items-center justify-center transition-transform active:scale-95 shadow-lg shadow-emerald-950/30 cursor-pointer"
           >
-            <Heart className="w-8 h-8 fill-emerald-400/30 stroke-[2.5]" />
+            <Heart className="w-7 h-7 fill-emerald-400/30 stroke-[2.5]" />
           </button>
 
           {/* Mark as Watched Button */}

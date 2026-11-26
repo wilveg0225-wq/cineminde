@@ -18,7 +18,12 @@ import {
   onSnapshot,
   Firestore,
 } from "firebase/firestore";
-import { WatchedMovie, MovieRecommendation } from "./movieLogic";
+import {
+  WatchedMovie,
+  MovieRecommendation,
+  DismissedMovie,
+  generateSmartFallbackTasteProfile,
+} from "./movieLogic";
 
 export interface FirebaseConfigValues {
   apiKey: string;
@@ -76,11 +81,47 @@ export function getFirebaseServices(): {
   };
 }
 
+export const DEFAULT_ADMIN_TEST_EMAILS = [
+  "admin@cineminde.test",
+  "admin@cineminde.se",
+  "admin@test.se",
+  "admin@test.com",
+];
+
+export function isAdminResetTestAccount(email?: string | null): boolean {
+  if (!email) return false;
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return false;
+  const configuredList = String(env.VITE_ADMIN_TEST_EMAIL || "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  const allowed = new Set([...DEFAULT_ADMIN_TEST_EMAILS, ...configuredList]);
+  return allowed.has(normalized);
+}
+
+export async function resetUserCloudData(uid: string): Promise<CloudUserData> {
+  const emptyPayload: CloudUserData = {
+    watchedMovies: [],
+    watchlist: [],
+    tasteProfileSummary: generateSmartFallbackTasteProfile([], []),
+    dislikedCategories: [],
+    dismissedMovies: [],
+    updatedAt: new Date().toISOString(),
+  };
+  const services = getFirebaseServices();
+  if (!services) return emptyPayload;
+  const userDocRef = doc(services.db, "users", uid);
+  await setDoc(userDocRef, emptyPayload, { merge: false });
+  return emptyPayload;
+}
+
 export interface CloudUserData {
   watchedMovies: WatchedMovie[];
   watchlist: MovieRecommendation[];
   tasteProfileSummary: string;
   dislikedCategories?: string[];
+  dismissedMovies?: DismissedMovie[];
   updatedAt: string;
 }
 
@@ -169,12 +210,16 @@ export async function loadOrInitializeUserCloudData(
       dislikedCategories: Array.isArray(data.dislikedCategories)
         ? data.dislikedCategories
         : fallbackData.dislikedCategories || [],
+      dismissedMovies: Array.isArray(data.dismissedMovies)
+        ? data.dismissedMovies
+        : fallbackData.dismissedMovies || [],
       updatedAt: data.updatedAt || new Date().toISOString(),
     };
   } else {
     const initialPayload: CloudUserData = {
       ...fallbackData,
       dislikedCategories: fallbackData.dislikedCategories || [],
+      dismissedMovies: fallbackData.dismissedMovies || [],
       updatedAt: new Date().toISOString(),
     };
     await setDoc(userDocRef, initialPayload, { merge: true });
@@ -195,6 +240,7 @@ export async function saveUserCloudData(
       watchlist: data.watchlist,
       tasteProfileSummary: data.tasteProfileSummary,
       dislikedCategories: data.dislikedCategories || [],
+      dismissedMovies: data.dismissedMovies || [],
       updatedAt: new Date().toISOString(),
     })
   );
@@ -203,28 +249,38 @@ export async function saveUserCloudData(
 
 export function subscribeToUserCloudData(
   uid: string,
-  onUpdate: (data: CloudUserData) => void
+  onUpdate: (data: CloudUserData) => void,
+  onError?: (err: unknown) => void
 ): () => void {
   const services = getFirebaseServices();
   if (!services) return () => {};
   const userDocRef = doc(services.db, "users", uid);
-  return onSnapshot(userDocRef, (snap) => {
-    if (!snap.exists()) return;
-    const data = snap.data() as Partial<CloudUserData>;
-    if (
-      Array.isArray(data.watchedMovies) &&
-      Array.isArray(data.watchlist) &&
-      typeof data.tasteProfileSummary === "string"
-    ) {
-      onUpdate({
-        watchedMovies: data.watchedMovies,
-        watchlist: data.watchlist,
-        tasteProfileSummary: data.tasteProfileSummary,
-        dislikedCategories: Array.isArray(data.dislikedCategories)
-          ? data.dislikedCategories
-          : [],
-        updatedAt: data.updatedAt || "",
-      });
+  return onSnapshot(
+    userDocRef,
+    (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as Partial<CloudUserData>;
+      if (
+        Array.isArray(data.watchedMovies) &&
+        Array.isArray(data.watchlist) &&
+        typeof data.tasteProfileSummary === "string"
+      ) {
+        onUpdate({
+          watchedMovies: data.watchedMovies,
+          watchlist: data.watchlist,
+          tasteProfileSummary: data.tasteProfileSummary,
+          dislikedCategories: Array.isArray(data.dislikedCategories)
+            ? data.dislikedCategories
+            : [],
+          dismissedMovies: Array.isArray(data.dismissedMovies)
+            ? data.dismissedMovies
+            : [],
+          updatedAt: data.updatedAt || "",
+        });
+      }
+    },
+    (err) => {
+      onError?.(err);
     }
-  });
+  );
 }
