@@ -937,7 +937,19 @@ export default function App() {
     const target = watchlist.find((w) => w.id === id);
     setWatchlist((prev) => prev.filter((w) => w.id !== id));
     if (target) {
-      showToast(`"${target.title}" togs bort från Watchlist`);
+      showToast(`"${target.title}" togs bort från Watchlist`, {
+        undoLabel: "Ångra",
+        onUndo: () => {
+          setWatchlist((prev) => {
+            const norm = normalizeMovieTitle(target.title);
+            if (prev.some((w) => normalizeMovieTitle(w.title) === norm)) {
+              return prev;
+            }
+            return [target, ...prev];
+          });
+          setToastState(null);
+        },
+      });
     }
   };
 
@@ -1281,7 +1293,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0c] text-[#f4f4f6] pb-28">
+    <div className="min-h-screen bg-[#0a0a0c] text-[#f4f4f6] pb-36">
       <div className="max-w-md mx-auto px-4 pt-safe-top">
         {/* Compact Top Header */}
         <header className="flex items-center justify-between gap-3 pb-4 mb-5 border-b border-white/[0.08]">
@@ -1308,26 +1320,6 @@ export default function App() {
             </button>
           )}
         </header>
-
-        {/* Feedback Toast Banner */}
-        {toastState && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="mb-4 px-4 py-2.5 rounded-xl bg-[#16161a] border border-[#f59e0b]/40 text-xs font-medium text-[#f59e0b] shadow-lg flex items-center justify-between gap-3"
-          >
-            <span className="flex-1 text-center">{toastState.message}</span>
-            {toastState.onUndo && toastState.undoLabel && (
-              <button
-                type="button"
-                onClick={toastState.onUndo}
-                className="px-2.5 py-1 rounded-lg bg-[#f59e0b]/20 hover:bg-[#f59e0b]/30 border border-[#f59e0b]/50 text-[11px] font-bold text-amber-200 shrink-0 cursor-pointer transition-colors"
-              >
-                {toastState.undoLabel}
-              </button>
-            )}
-          </div>
-        )}
 
         {/* Active Tab View */}
         <main>
@@ -1407,6 +1399,28 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Fixed Floating Feedback & Undo Toast */}
+      {toastState && (
+        <div className="fixed bottom-20 left-0 right-0 z-50 px-4 pointer-events-none pb-[env(safe-area-inset-bottom,0px)]">
+          <div
+            role="status"
+            aria-live="polite"
+            className="max-w-md mx-auto pointer-events-auto px-4 py-2.5 rounded-xl bg-[#16161a]/95 backdrop-blur-md border border-[#f59e0b]/50 text-xs font-medium text-[#f59e0b] shadow-2xl shadow-black/70 flex items-center justify-between gap-3"
+          >
+            <span className="flex-1 text-left">{toastState.message}</span>
+            {toastState.onUndo && toastState.undoLabel && (
+              <button
+                type="button"
+                onClick={toastState.onUndo}
+                className="px-3 py-1 rounded-lg bg-[#f59e0b]/20 hover:bg-[#f59e0b]/35 border border-[#f59e0b]/50 text-[11px] font-bold text-amber-200 shrink-0 cursor-pointer transition-colors"
+              >
+                {toastState.undoLabel}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Fixed Bottom Navigation Bar */}
       <BottomNav

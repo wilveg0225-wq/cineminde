@@ -516,7 +516,7 @@ async function fetchCollaborativeTmdbCandidates(
         const seedLabel = seedTitles.slice(0, 2).join(" och ");
         const genrePhrase =
           tmdbGenres.length > 0
-            ? ` inom ${tmdbGenres.slice(0, 2).join(" & ").toLowerCase()}`
+            ? ` inom ${tmdbGenres.slice(0, 2).join(" och ").toLowerCase()}`
             : "";
         const motivation =
           overview.length > 30 && isLikelySwedishText(overview)
@@ -869,7 +869,11 @@ async function discoverTmdbCandidates(
       const monetization = hasRentBuyOnly
         ? "flatrate|rent|buy"
         : "flatrate|free|ads";
-      watchParam = `&watch_region=SE&with_watch_providers=${providerParam}&watch_provider_monetization_types=${monetization}`;
+      watchParam = `&watch_region=SE&with_watch_providers=${providerParam}&with_watch_monetization_types=${monetization}`;
+    } else {
+      // Default to titles actually streamable in Sweden right now (also filters out unreleased cinema-only titles)
+      watchParam =
+        "&watch_region=SE&with_watch_monetization_types=flatrate|free|ads";
     }
 
     const discovered: MovieRecommendation[] = [];
@@ -1129,13 +1133,19 @@ async function discoverTmdbCandidates(
         // Fallback 3: if strict combination yielded 0 hits and we had 3+ rules, relax to the first 2 rules
         if (
           (!data?.results || data.results.length === 0) &&
-          ruleTokens.length > 2
+          (ruleTokens.length > 2 || !hasProviders)
         ) {
-          const relaxedParam = `&with_genres=${encodeURIComponent(
-            ruleTokens.slice(0, 2).join(",")
-          )}`;
+          const relaxedParam =
+            ruleTokens.length > 2
+              ? `&with_genres=${encodeURIComponent(
+                  ruleTokens.slice(0, 2).join(",")
+                )}`
+              : genreParam;
+          const relaxedWatchParam = hasProviders
+            ? watchParam
+            : "&watch_region=SE&with_watch_monetization_types=flatrate|free|ads|rent|buy";
           const fallbackVoteCount = hasProviders ? 15 : 40;
-          const fallbackUrl = `/discover/${mediaType}?language=sv-SE&include_adult=false&sort_by=${sortBy}&vote_count.gte=${fallbackVoteCount}&page=${p}${watchParam}${relaxedParam}${withoutGenreParam}${withoutKeywordParam}${yearParam}${originCountryParam}${originalLangParam}${variantExtra}`;
+          const fallbackUrl = `/discover/${mediaType}?language=sv-SE&include_adult=false&sort_by=${sortBy}&vote_count.gte=${fallbackVoteCount}&page=${p}${relaxedWatchParam}${relaxedParam}${withoutGenreParam}${withoutKeywordParam}${yearParam}${originCountryParam}${originalLangParam}${variantExtra}`;
           try {
             data = (await fetchFromTmdbApi(fallbackUrl, tmdbKey)) as {
               results?: Array<Record<string, unknown>>;
@@ -1186,7 +1196,7 @@ async function discoverTmdbCandidates(
           const overview = String(hit.overview || "").trim();
           const genreSummary =
             tmdbGenres.length > 0
-              ? tmdbGenres.slice(0, 2).join(" & ").toLowerCase()
+              ? tmdbGenres.slice(0, 2).join(" och ").toLowerCase()
               : "dina valda kategorier";
 
           const motivation =
@@ -2606,12 +2616,30 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
                 ? "1 säsong"
                 : `${finalSeasonCount} säsonger`;
           }
+          let finalSwedishProviders = rec.swedishProviders;
+          if (
+            tmdbKey &&
+            rec.tmdbId &&
+            (!finalSwedishProviders ||
+              finalSwedishProviders.type === "none" ||
+              finalSwedishProviders.providers.length === 0)
+          ) {
+            const fetchedProviders = await fetchTmdbSwedishProvidersCached(
+              rec.tmdbId,
+              rec.mediaType === "tv" ? "tv" : "movie",
+              tmdbKey
+            );
+            if (fetchedProviders && fetchedProviders.providers.length > 0) {
+              finalSwedishProviders = fetchedProviders;
+            }
+          }
           return {
             ...rec,
             title: finalTitle,
             runtime: finalRuntime,
             seasonCount: rec.mediaType === "tv" ? finalSeasonCount : undefined,
             ageRating: finalAgeRating,
+            swedishProviders: finalSwedishProviders,
           };
         })
       );

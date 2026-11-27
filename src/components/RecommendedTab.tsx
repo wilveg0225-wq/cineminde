@@ -604,8 +604,9 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
                 )}
 
                 {/* Gradient overlays for readability */}
-                <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a0c] via-[#0a0a0c]/70 to-transparent" />
-                <div className="absolute top-0 inset-x-0 h-24 bg-gradient-to-b from-black/60 to-transparent pointer-events-none" />
+                <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a0c] via-[#0a0a0c]/85 via-45% to-transparent" />
+                <div className="absolute bottom-0 inset-x-0 h-1/2 bg-gradient-to-t from-[#0a0a0c] via-[#0a0a0c]/90 to-transparent pointer-events-none" />
+                <div className="absolute top-0 inset-x-0 h-24 bg-gradient-to-b from-black/65 to-transparent pointer-events-none" />
               </div>
 
               {/* LIKE & NOPE Stamps Overlay */}
@@ -967,6 +968,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
                                   )}
                                   {movie.mediaType === "tv" ? "Serie" : "Film"}
                                 </span>
+                                <span>·</span>
                                 <AgeRatingBadge
                                   ageRating={
                                     movie.ageRating ||
@@ -1087,6 +1089,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
                               <span>
                                 {movie.mediaType === "tv" ? "Serie" : "Film"}
                               </span>
+                              <span>·</span>
                               <AgeRatingBadge
                                   ageRating={
                                     movie.ageRating ||

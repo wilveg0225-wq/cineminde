@@ -247,7 +247,7 @@ export const TasteProfileTab: React.FC<TasteProfileTabProps> = ({
             type="text"
             value={customInput}
             onChange={(e) => setCustomInput(e.target.value)}
-            placeholder="Skriv egen kategori (t.ex. Splatter, Zombies...)"
+            placeholder="t.ex. Splatter, Zombies"
             className="flex-1 min-h-[38px] px-3.5 rounded-xl bg-[#0a0a0c] border border-white/[0.1] text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-rose-500/60 focus:ring-1 focus:ring-rose-500/30 transition-all"
           />
           <button

@@ -218,7 +218,7 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({
                     setMovieInput(e.target.value);
                     if (inputError) setInputError(null);
                   }}
-                  placeholder="Sök på en film eller serie du vill se..."
+                  placeholder="Sök film eller serie..."
                   className="w-full min-h-[44px] rounded-xl bg-[#0a0a0c] border border-white/[0.08] pl-9 pr-8 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#e11d48] transition-colors"
                 />
                 {isSearching && (
@@ -238,7 +238,7 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({
               type="text"
               value={noteInput}
               onChange={(e) => setNoteInput(e.target.value)}
-              placeholder="Valfri notis (t.ex. 'Se med familjen på fredag' eller 'Såg trailer')"
+              placeholder="Valfri notis (t.ex. fredagsfilm)"
               className="w-full min-h-[38px] rounded-xl bg-[#0a0a0c]/70 border border-white/[0.06] px-3.5 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-white/[0.2] transition-colors"
             />
 

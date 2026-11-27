@@ -198,7 +198,7 @@ export const WatchedTab: React.FC<WatchedTabProps> = ({
                     setMovieInput(e.target.value);
                     if (inputError) setInputError(null);
                   }}
-                  placeholder="Sök på en film eller TV-serie..."
+                  placeholder="Sök film eller serie..."
                   className="w-full min-h-[44px] rounded-xl bg-[#0a0a0c] border border-white/[0.08] pl-9 pr-8 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#e11d48] transition-colors"
                 />
                 {isSearching && (

@@ -186,6 +186,8 @@ export const TonightTab: React.FC<TonightTabProps> = ({
   const [activeCategory, setActiveCategory] =
     useState<FilterCategoryKey>("genres");
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
+  const [showCategoryFilters, setShowCategoryFilters] = useState(false);
+  const [showStreamingFilters, setShowStreamingFilters] = useState(false);
   const [steeringCardKey, setSteeringCardKey] = useState<string | null>(null);
   const [steeringSliders, setSteeringSliders] = useState<MovieSteeringSliders>({
     ...DEFAULT_STEERING_SLIDERS,
@@ -267,6 +269,8 @@ export const TonightTab: React.FC<TonightTabProps> = ({
   };
 
   const handleFindClick = async () => {
+    setShowCategoryFilters(false);
+    setShowStreamingFilters(false);
     await onFindMovies();
     setTimeout(() => {
       resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -389,7 +393,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
       {/* Intro & Filter Panel */}
       <section
         aria-label="Kvällens önskemål"
-        className="bg-[#16161a] border border-white/[0.08] rounded-2xl p-5 space-y-5"
+        className="bg-[#16161a] border border-white/[0.08] rounded-2xl p-4 sm:p-5 space-y-4"
       >
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -521,13 +525,83 @@ export const TonightTab: React.FC<TonightTabProps> = ({
           )}
         </div>
 
-        {/* Category Tabs Bar (Single compact row on mobile) */}
+        {/* Compact Filter Drawer Toggles: Genrer & Streamingtjänster */}
         <div className="space-y-2.5">
-          <div
-            role="tablist"
-            aria-label="Filterkategorier"
-            className="grid grid-cols-4 gap-1 p-1 rounded-xl bg-[#0a0a0c] border border-white/[0.07]"
-          >
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setShowCategoryFilters((prev) => !prev);
+                setShowStreamingFilters(false);
+              }}
+              aria-expanded={showCategoryFilters}
+              className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-1.5 border transition-colors cursor-pointer ${
+                showCategoryFilters
+                  ? "bg-[#e11d48]/15 text-white border-[#e11d48]/50"
+                  : selectedTags.length > 0
+                  ? "bg-[#0a0a0c] text-white border-[#f59e0b]/45 hover:bg-white/[0.05]"
+                  : "bg-[#0a0a0c] text-zinc-200 border-white/[0.1] hover:bg-white/[0.05]"
+              }`}
+            >
+              <span className="inline-flex items-center gap-1.5 min-w-0">
+                <SlidersHorizontal className="w-3.5 h-3.5 text-[#f59e0b] shrink-0" />
+                <span className="truncate">Filter</span>
+              </span>
+              <span className="inline-flex items-center gap-1 shrink-0">
+                {selectedTags.length > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-full bg-[#f59e0b] text-[#0a0a0c] text-[10px] font-mono-num font-bold leading-none">
+                    {selectedTags.length}
+                  </span>
+                )}
+                {showCategoryFilters ? (
+                  <ChevronUp className="w-3.5 h-3.5 text-zinc-400" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+                )}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setShowStreamingFilters((prev) => !prev);
+                setShowCategoryFilters(false);
+              }}
+              aria-expanded={showStreamingFilters}
+              className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-1.5 border transition-colors cursor-pointer ${
+                showStreamingFilters
+                  ? "bg-emerald-500/15 text-emerald-200 border-emerald-500/50"
+                  : selectedProviders.length > 0
+                  ? "bg-[#0a0a0c] text-emerald-300 border-emerald-500/45 hover:bg-white/[0.05]"
+                  : "bg-[#0a0a0c] text-zinc-200 border-white/[0.1] hover:bg-white/[0.05]"
+              }`}
+            >
+              <span className="inline-flex items-center gap-1.5 min-w-0">
+                <Tv className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span className="truncate">Streaming</span>
+              </span>
+              <span className="inline-flex items-center gap-1 shrink-0">
+                {selectedProviders.length > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-full bg-emerald-500 text-[#0a0a0c] text-[10px] font-mono-num font-bold leading-none">
+                    {selectedProviders.length}
+                  </span>
+                )}
+                {showStreamingFilters ? (
+                  <ChevronUp className="w-3.5 h-3.5 text-zinc-400" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+                )}
+              </span>
+            </button>
+          </div>
+
+          {showCategoryFilters && (
+            <div className="space-y-2.5 pt-1">
+              <div
+                role="tablist"
+                aria-label="Filterkategorier"
+                className="grid grid-cols-4 gap-1 p-1 rounded-xl bg-[#0a0a0c] border border-white/[0.07]"
+              >
             {FILTER_CATEGORIES.map((cat) => {
               const isTabActive = activeCategory === cat.key;
               const count = getCategoryValues(cat.key).length;
@@ -617,7 +691,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                         toggleChip(currentCatConfig.key, group.label)
                       }
                       aria-pressed={mainSelected}
-                      className="flex-1 min-w-0 min-h-[38px] pl-2.5 pr-1.5 py-1.5 rounded-l-xl text-xs font-medium flex items-center justify-start text-left cursor-pointer"
+                      className="flex-1 min-w-0 min-h-[38px] pl-2 sm:pl-2.5 pr-1 sm:pr-1.5 py-1.5 rounded-l-xl text-[11px] sm:text-xs font-medium flex items-center justify-start text-left cursor-pointer"
                     >
                       <span className="truncate">{group.label}</span>
                     </button>
@@ -630,7 +704,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                       aria-expanded={isExpanded}
                       aria-label={`Öppna underkategorier för ${group.label}`}
                       title={`Välj underkategorier för ${group.label}`}
-                      className={`min-h-[38px] w-8 rounded-r-xl flex items-center justify-center border-l transition-colors cursor-pointer shrink-0 ${
+                      className={`min-h-[38px] w-7 sm:w-8 rounded-r-xl flex items-center justify-center border-l transition-colors cursor-pointer shrink-0 ${
                         mainSelected
                           ? "border-black/20 hover:bg-black/15"
                           : selectedSubCount > 0
@@ -647,6 +721,8 @@ export const TonightTab: React.FC<TonightTabProps> = ({
               })}
             </div>
           </div>
+            </div>
+          )}
 
           {/* Integrated Popup Modal / Bottom Sheet for [+] Subcategories */}
           {expandedGroup && (
@@ -798,7 +874,8 @@ export const TonightTab: React.FC<TonightTabProps> = ({
           )}
         </div>
 
-        {/* Mina streamingtjänster (sparar & sorterar automatiskt) */}
+        {/* Mina streamingtjänster (hopfällbar panel) */}
+        {showStreamingFilters && (
         <div className="pt-3 border-t border-white/[0.06] space-y-2">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-semibold text-zinc-300">
@@ -869,6 +946,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
             })}
           </div>
         </div>
+        )}
 
         {/* Fritextfält (valfritt) */}
         <div className="pt-3 border-t border-white/[0.06]">
@@ -888,7 +966,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                 customText: e.target.value,
               })
             }
-            placeholder="t.ex. Något i stil med The Witcher eller en mörk thriller"
+            placeholder="t.ex. som The Witcher, mörk thriller..."
             className="w-full min-h-[44px] rounded-xl bg-[#0a0a0c] border border-white/[0.08] px-3.5 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#e11d48] transition-colors"
           />
         </div>
@@ -1240,93 +1318,90 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                     swedishProviders={rec.swedishProviders}
                   />
 
-                  {/* Actions: + Watchlist & Redan sett */}
-                  <div className="grid grid-cols-2 gap-2.5 pt-2">
-                    <button
-                      type="button"
-                      onClick={() => onAddToWatchlist(rec)}
-                      disabled={saved}
-                      aria-label={
-                        saved
-                          ? `I Watchlist (${rec.title})`
-                          : `+ Watchlist (${rec.title})`
-                      }
-                      className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                        saved
-                          ? "bg-white/[0.04] text-[#f59e0b] border border-[#f59e0b]/40 cursor-default"
-                          : "bg-[#0a0a0c] hover:bg-white/[0.06] text-white border border-white/[0.12]"
-                      }`}
-                    >
-                      {saved ? (
-                        <>
-                          <Check className="w-4 h-4 text-[#f59e0b]" />
-                          <span>I Watchlist</span>
-                        </>
-                      ) : (
-                        <>
-                          <Plus className="w-4 h-4 text-[#f59e0b]" />
-                          <span>Watchlist</span>
-                        </>
+                  {/* 2×2 åtgärdsknappar: Watchlist, Redan sett, Åt rätt håll & Inte intresserad */}
+                  <div className="pt-2">
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => onAddToWatchlist(rec)}
+                        disabled={saved}
+                        aria-label={
+                          saved
+                            ? `I Watchlist (${rec.title})`
+                            : `+ Watchlist (${rec.title})`
+                        }
+                        className={`min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                          saved
+                            ? "bg-white/[0.04] text-[#f59e0b] border border-[#f59e0b]/40 cursor-default"
+                            : "bg-[#0a0a0c] hover:bg-white/[0.06] text-white border border-white/[0.12] cursor-pointer"
+                        }`}
+                      >
+                        {saved ? (
+                          <>
+                            <Check className="w-4 h-4 text-[#f59e0b] shrink-0" />
+                            <span>I Watchlist</span>
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="w-4 h-4 text-[#f59e0b] shrink-0" />
+                            <span>Watchlist</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onMarkAsWatched(rec)}
+                        aria-label={`Redan sett (${rec.title})`}
+                        className="min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold bg-[#0a0a0c] hover:bg-white/[0.06] text-zinc-200 hover:text-white border border-white/[0.12] flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                      >
+                        <CheckCircle2 className="w-4 h-4 text-[#e11d48] shrink-0" />
+                        <span>Redan sett</span>
+                      </button>
+
+                      {onSteerFromMovie && (
+                        <button
+                          type="button"
+                          onClick={() => openSteeringForCard(cardKey)}
+                          aria-expanded={isSteeringOpen}
+                          aria-label={`Åt rätt håll – styr vidare från ${rec.title}`}
+                          className={`min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 border transition-colors cursor-pointer whitespace-nowrap ${
+                            !onDismissMovie ? "col-span-2" : ""
+                          } ${
+                            isSteeringOpen
+                              ? "bg-[#e11d48]/15 text-white border-[#e11d48]/50"
+                              : "bg-[#0a0a0c] hover:bg-white/[0.06] text-zinc-200 hover:text-white border-white/[0.12]"
+                          }`}
+                        >
+                          <SlidersHorizontal className="w-3.5 h-3.5 text-[#f59e0b] shrink-0" />
+                          <span>
+                            {isSteeringOpen ? "Styr riktning" : "Åt rätt håll?"}
+                          </span>
+                          {isSteeringOpen ? (
+                            <ChevronUp className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                          ) : (
+                            <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                          )}
+                        </button>
                       )}
-                    </button>
 
-                    <button
-                      type="button"
-                      onClick={() => onMarkAsWatched(rec)}
-                      aria-label={`Redan sett (${rec.title})`}
-                      className="min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold bg-[#e11d48]/15 hover:bg-[#e11d48]/25 text-white border border-[#e11d48]/40 flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                    >
-                      <CheckCircle2 className="w-4 h-4 text-[#e11d48]" />
-                      <span>Redan sett</span>
-                    </button>
-                  </div>
+                      {onDismissMovie && (
+                        <button
+                          type="button"
+                          onClick={() => onDismissMovie(rec)}
+                          aria-label={`Inte intresserad av ${rec.title}`}
+                          title="Inte intresserad – göm och styr bort från liknande"
+                          className={`min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold bg-[#0a0a0c] hover:bg-white/[0.06] text-zinc-200 hover:text-white border border-white/[0.12] flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                            !onSteerFromMovie ? "col-span-2" : ""
+                          }`}
+                        >
+                          <X className="w-4 h-4 text-[#e11d48] shrink-0" />
+                          <span>Inte intresserad</span>
+                        </button>
+                      )}
+                    </div>
 
-                  {/* Styr vidare från denna film & Inte intresserad */}
-                  {(onSteerFromMovie || onDismissMovie) && (
-                    <div className="pt-1">
-                      <div className="flex items-center gap-2">
-                        {onSteerFromMovie && (
-                          <button
-                            type="button"
-                            onClick={() => openSteeringForCard(cardKey)}
-                            aria-expanded={isSteeringOpen}
-                            className={`flex-1 min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 border transition-colors cursor-pointer ${
-                              isSteeringOpen
-                                ? "bg-[#e11d48]/15 text-white border-[#e11d48]/50"
-                                : "bg-white/[0.03] hover:bg-white/[0.07] text-zinc-200 border-white/[0.08]"
-                            }`}
-                          >
-                            <span className="inline-flex items-center gap-2">
-                              <SlidersHorizontal className="w-3.5 h-3.5 text-[#f59e0b]" />
-                              <span>
-                                {isSteeringOpen
-                                  ? "Styr riktning från denna film"
-                                  : "Åt rätt håll? Styr vidare från denna"}
-                              </span>
-                            </span>
-                            {isSteeringOpen ? (
-                              <ChevronUp className="w-4 h-4 text-zinc-400" />
-                            ) : (
-                              <ChevronDown className="w-4 h-4 text-zinc-400" />
-                            )}
-                          </button>
-                        )}
-                        {onDismissMovie && (
-                          <button
-                            type="button"
-                            onClick={() => onDismissMovie(rec)}
-                            aria-label={`Inte intresserad av ${rec.title}`}
-                            title="Inte intresserad – göm och styr bort från liknande"
-                            className="min-h-[40px] px-3 py-2 rounded-xl text-xs font-medium bg-white/[0.02] hover:bg-rose-950/40 text-zinc-400 hover:text-rose-300 border border-white/[0.08] hover:border-rose-500/40 flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                            <span className="sm:hidden">Göm</span>
-                            <span className="hidden sm:inline">Inte intresserad</span>
-                          </button>
-                        )}
-                      </div>
-
-                      {isSteeringOpen && (
+                    {isSteeringOpen && (
                         <div className="mt-3 rounded-xl bg-[#0e0e12] border border-white/[0.1] p-4 space-y-4">
                           <div className="flex items-start justify-between gap-2">
                             <div>
@@ -1430,7 +1505,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                             type="text"
                             value={steeringNote}
                             onChange={(e) => setSteeringNote(e.target.value)}
-                            placeholder="Valfritt: t.ex. mer 90-talskänsla eller utspelar sig i rymden..."
+                            placeholder="Valfritt: t.ex. mer 90-tal, i rymden..."
                             className="w-full min-h-[38px] rounded-xl bg-[#16161a] border border-white/[0.09] px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#e11d48] transition-colors"
                           />
 
@@ -1458,7 +1533,6 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                         </div>
                       )}
                     </div>
-                  )}
                 </article>
               );
             })}

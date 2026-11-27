@@ -73,7 +73,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
               onClick={() => onSelectTab(item.id)}
               aria-current={isActive ? "page" : undefined}
               title={item.subtitle}
-              className={`relative flex flex-col items-center justify-center min-h-[48px] rounded-xl transition-colors cursor-pointer select-none px-0.5 ${
+              className={`relative flex flex-col items-center justify-center min-h-[48px] rounded-xl transition-colors cursor-pointer select-none px-0.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f59e0b]/70 ${
                 isActive
                   ? "text-[#e11d48]"
                   : "text-zinc-400 hover:text-zinc-200"
