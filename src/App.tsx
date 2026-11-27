@@ -35,9 +35,11 @@ import {
   normalizeMovieTitle,
   filterDuplicateRecommendations,
   generateSmartFallbackRecommendations,
+  generateSmartRecommendationsWithStatus,
   generateSmartFallbackTasteProfile,
   lookupCuratedTmdbMovie,
   inferAgeRatingFromGenres,
+  NO_EXACT_MATCH_FALLBACK_MESSAGE,
 } from "./utils/movieLogic";
 
 const STORAGE_KEYS = {
@@ -90,17 +92,29 @@ function loadInitialStreamingProviders(): string[] {
 function enrichWatchedWithCurated(movies: WatchedMovie[]): WatchedMovie[] {
   return movies.map((m) => {
     const meta = lookupCuratedTmdbMovie(m.originalTitle || m.title, m.year);
+    const tmdbGenreIds =
+      m.tmdbGenreIds && m.tmdbGenreIds.length > 0
+        ? m.tmdbGenreIds
+        : meta.tmdbGenreIds;
+    const tmdbGenres =
+      m.tmdbGenres && m.tmdbGenres.length > 0
+        ? m.tmdbGenres
+        : meta.tmdbGenres;
     return {
       ...m,
+      mediaType: m.mediaType || meta.mediaType,
       year: m.year || meta.year,
       tmdbId: m.tmdbId || meta.tmdbId,
       posterPath: m.posterPath || meta.posterPath,
       tmdbRating: m.tmdbRating || meta.voteAverage,
       swedishProviders: m.swedishProviders || meta.swedishProviders,
+      tmdbGenreIds,
+      tmdbGenres,
+      seasonCount: m.seasonCount ?? meta.seasonCount,
       ageRating:
         m.ageRating ||
         meta.ageRating ||
-        inferAgeRatingFromGenres(m.tmdbGenreIds || meta.tmdbGenreIds),
+        inferAgeRatingFromGenres(tmdbGenreIds),
     };
   });
 }
@@ -110,17 +124,29 @@ function enrichRecsWithCurated(
 ): MovieRecommendation[] {
   return recs.map((r) => {
     const meta = lookupCuratedTmdbMovie(r.originalTitle || r.title, r.year);
+    const tmdbGenreIds =
+      r.tmdbGenreIds && r.tmdbGenreIds.length > 0
+        ? r.tmdbGenreIds
+        : meta.tmdbGenreIds;
+    const tmdbGenres =
+      r.tmdbGenres && r.tmdbGenres.length > 0
+        ? r.tmdbGenres
+        : meta.tmdbGenres;
     return {
       ...r,
+      mediaType: r.mediaType || meta.mediaType,
       year: r.year || meta.year,
       tmdbId: r.tmdbId || meta.tmdbId,
       posterPath: r.posterPath || meta.posterPath,
       tmdbRating: r.tmdbRating || meta.voteAverage,
       swedishProviders: r.swedishProviders || meta.swedishProviders,
+      tmdbGenreIds,
+      tmdbGenres,
+      seasonCount: r.seasonCount ?? meta.seasonCount,
       ageRating:
         r.ageRating ||
         meta.ageRating ||
-        inferAgeRatingFromGenres(r.tmdbGenreIds || meta.tmdbGenreIds),
+        inferAgeRatingFromGenres(tmdbGenreIds),
     };
   });
 }
@@ -249,6 +275,7 @@ export default function App() {
 
   const [isLoadingRecs, setIsLoadingRecs] = useState(false);
   const [recsError, setRecsError] = useState<string | null>(null);
+  const [recsFallbackNotice, setRecsFallbackNotice] = useState<string | null>(null);
   const [activeSteering, setActiveSteering] =
     useState<MovieSteeringContext | null>(null);
   const [seenTonightTitles, setSeenTonightTitles] = useState<string[]>([]);
@@ -600,11 +627,21 @@ export default function App() {
             if (!hit) return m;
             return {
               ...m,
+              mediaType: m.mediaType || hit.mediaType,
               year: m.year || hit.year,
               tmdbId: hit.tmdbId || m.tmdbId,
               posterPath: hit.posterPath || m.posterPath,
               tmdbRating: hit.voteAverage || m.tmdbRating,
               swedishProviders: hit.swedishProviders || m.swedishProviders,
+              tmdbGenreIds:
+                m.tmdbGenreIds && m.tmdbGenreIds.length > 0
+                  ? m.tmdbGenreIds
+                  : hit.tmdbGenreIds,
+              tmdbGenres:
+                m.tmdbGenres && m.tmdbGenres.length > 0
+                  ? m.tmdbGenres
+                  : hit.tmdbGenres,
+              seasonCount: m.seasonCount ?? hit.seasonCount,
               ageRating: hit.ageRating || m.ageRating,
             };
           })
@@ -616,11 +653,21 @@ export default function App() {
             if (!hit) return m;
             return {
               ...m,
+              mediaType: m.mediaType || hit.mediaType,
               year: m.year || hit.year,
               tmdbId: hit.tmdbId || m.tmdbId,
               posterPath: hit.posterPath || m.posterPath,
               tmdbRating: hit.voteAverage || m.tmdbRating,
               swedishProviders: hit.swedishProviders || m.swedishProviders,
+              tmdbGenreIds:
+                m.tmdbGenreIds && m.tmdbGenreIds.length > 0
+                  ? m.tmdbGenreIds
+                  : hit.tmdbGenreIds,
+              tmdbGenres:
+                m.tmdbGenres && m.tmdbGenres.length > 0
+                  ? m.tmdbGenres
+                  : hit.tmdbGenres,
+              seasonCount: m.seasonCount ?? hit.seasonCount,
               ageRating: hit.ageRating || m.ageRating,
             };
           })
@@ -632,11 +679,21 @@ export default function App() {
             if (!hit) return m;
             return {
               ...m,
+              mediaType: m.mediaType || hit.mediaType,
               year: m.year || hit.year,
               tmdbId: hit.tmdbId || m.tmdbId,
               posterPath: hit.posterPath || m.posterPath,
               tmdbRating: hit.voteAverage || m.tmdbRating,
               swedishProviders: hit.swedishProviders || m.swedishProviders,
+              tmdbGenreIds:
+                m.tmdbGenreIds && m.tmdbGenreIds.length > 0
+                  ? m.tmdbGenreIds
+                  : hit.tmdbGenreIds,
+              tmdbGenres:
+                m.tmdbGenres && m.tmdbGenres.length > 0
+                  ? m.tmdbGenres
+                  : hit.tmdbGenres,
+              seasonCount: m.seasonCount ?? hit.seasonCount,
               ageRating: hit.ageRating || m.ageRating,
             };
           })
@@ -685,6 +742,7 @@ export default function App() {
 
     setIsLoadingRecs(true);
     setRecsError(null);
+    setRecsFallbackNotice(null);
     setActiveSteering(steeringOverride);
 
     const currentTitles = recommendations.map((r) => r.title);
@@ -730,6 +788,7 @@ export default function App() {
           dislikedCategories,
           dismissedMovies,
           previousTitles: allPrevious,
+          allowWatchlistInResults: true,
         }),
       });
 
@@ -746,10 +805,17 @@ export default function App() {
         const clean = filterDuplicateRecommendations(
           data.recommendations,
           watchedMovies,
-          watchlist
+          watchlist,
+          [],
+          { excludeWatchlist: false }
         );
         if (clean.length > 0) {
           setRecommendations(enrichRecsWithCurated(clean));
+          setRecsFallbackNotice(
+            data.exactMatchesFound === false
+              ? data.fallbackMessage || NO_EXACT_MATCH_FALLBACK_MESSAGE
+              : null
+          );
           if (steeringOverride) {
             setSeenTonightTitles((prev) =>
               Array.from(
@@ -758,26 +824,38 @@ export default function App() {
             );
           }
         } else {
-          const fallback = generateSmartFallbackRecommendations(
+          const fallbackRes = generateSmartRecommendationsWithStatus(
             watchedMovies,
             watchlist,
             effectivePreferences,
             dislikedCategories,
             allPrevious,
-            dismissedMovies
+            dismissedMovies,
+            tasteProfileSummary
           );
-          setRecommendations(fallback);
+          setRecommendations(fallbackRes.recommendations);
+          setRecsFallbackNotice(
+            fallbackRes.exactMatchesFound
+              ? null
+              : fallbackRes.fallbackMessage || NO_EXACT_MATCH_FALLBACK_MESSAGE
+          );
         }
       } else {
-        const fallback = generateSmartFallbackRecommendations(
+        const fallbackRes = generateSmartRecommendationsWithStatus(
           watchedMovies,
           watchlist,
           effectivePreferences,
           dislikedCategories,
           allPrevious,
-          dismissedMovies
+          dismissedMovies,
+          tasteProfileSummary
         );
-        setRecommendations(fallback);
+        setRecommendations(fallbackRes.recommendations);
+        setRecsFallbackNotice(
+          fallbackRes.exactMatchesFound
+            ? null
+            : fallbackRes.fallbackMessage || NO_EXACT_MATCH_FALLBACK_MESSAGE
+        );
       }
     } catch (err) {
       if (
@@ -789,15 +867,21 @@ export default function App() {
       setRecsError(
         "Kunde inte nå servern just nu – visar reservförslag i stället."
       );
-      const fallback = generateSmartFallbackRecommendations(
+      const fallbackRes = generateSmartRecommendationsWithStatus(
         watchedMovies,
         watchlist,
         effectivePreferences,
         dislikedCategories,
         allPrevious,
-        dismissedMovies
+        dismissedMovies,
+        tasteProfileSummary
       );
-      setRecommendations(fallback);
+      setRecommendations(fallbackRes.recommendations);
+      setRecsFallbackNotice(
+        fallbackRes.exactMatchesFound
+          ? null
+          : fallbackRes.fallbackMessage || NO_EXACT_MATCH_FALLBACK_MESSAGE
+      );
     } finally {
       if (recsAbortControllerRef.current === controller) {
         setIsLoadingRecs(false);
@@ -916,12 +1000,23 @@ export default function App() {
               item.id === movie.id
                 ? {
                     ...item,
+                    mediaType: item.mediaType || hit.mediaType,
                     year: item.year || hit.year,
                     tmdbId: hit.tmdbId || item.tmdbId,
                     posterPath: hit.posterPath || item.posterPath,
                     tmdbRating: hit.voteAverage || item.tmdbRating,
                     swedishProviders:
                       hit.swedishProviders || item.swedishProviders,
+                    tmdbGenreIds:
+                      item.tmdbGenreIds && item.tmdbGenreIds.length > 0
+                        ? item.tmdbGenreIds
+                        : hit.tmdbGenreIds,
+                    tmdbGenres:
+                      item.tmdbGenres && item.tmdbGenres.length > 0
+                        ? item.tmdbGenres
+                        : hit.tmdbGenres,
+                    seasonCount: item.seasonCount ?? hit.seasonCount,
+                    ageRating: item.ageRating || hit.ageRating,
                   }
                 : item
             )
@@ -1127,6 +1222,14 @@ export default function App() {
       posterPath: movieData.posterPath || meta.posterPath,
       tmdbRating: movieData.tmdbRating || meta.voteAverage,
       swedishProviders: movieData.swedishProviders || meta.swedishProviders,
+      tmdbGenreIds:
+        movieData.tmdbGenreIds && movieData.tmdbGenreIds.length > 0
+          ? movieData.tmdbGenreIds
+          : meta.tmdbGenreIds,
+      tmdbGenres:
+        movieData.tmdbGenres && movieData.tmdbGenres.length > 0
+          ? movieData.tmdbGenres
+          : meta.tmdbGenres,
     };
 
     let nextWatched: WatchedMovie[];
@@ -1345,6 +1448,8 @@ export default function App() {
               recommendations={recommendations}
               isLoading={isLoadingRecs}
               error={recsError}
+              fallbackNotice={recsFallbackNotice}
+              onClearFallbackNotice={() => setRecsFallbackNotice(null)}
               onFindMovies={handleFindMovies}
               onSteerFromMovie={handleSteerFromMovie}
               activeSteering={activeSteering}

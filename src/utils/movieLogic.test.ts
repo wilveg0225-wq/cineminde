@@ -17,8 +17,12 @@ import {
   searchCuratedTmdbMovies,
   filterMoviesByStreamingServices,
   filterAndVerifyMoviesByTmdbCategories,
+  filterAndVerifyMoviesWithFallback,
   limitAnimatedRecommendations,
   verifyMovieAgainstTmdbCategories,
+  NO_EXACT_MATCH_FALLBACK_MESSAGE,
+  scoreCandidateForUserProfile,
+  generateSmartRecommendationsWithStatus,
   lookupCuratedTmdbMovie,
   isMovieMatchingDislikedCategories,
   filterOutDislikedCategories,
@@ -2217,5 +2221,633 @@ test("Thriller & Spänning rejects gentle Drama/Mystery movies while allowing TV
       thrillerPrefs
     ).verified,
     true
+  );
+});
+
+test("AC1: Strict multi-category AND verification for 2+ and 3+ rules rejects missing genres & empty uncurated genres", () => {
+  const threeGenrePrefs = {
+    moods: [],
+    genres: ["Action", "Sci-Fi", "Komedi"],
+    contents: [],
+    frameworks: [],
+    customText: "",
+    mediaType: "movie" as const,
+  };
+
+  // Missing Komedi (2/3 match) MUST fail strict AND verification
+  const partialTwoOfThree = verifyMovieAgainstTmdbCategories(
+    { mediaType: "movie", tmdbGenreIds: [28, 878] },
+    threeGenrePrefs
+  );
+  assert.equal(partialTwoOfThree.verified, false);
+  assert.equal(partialTwoOfThree.matchedRuleCount, 2);
+  assert.equal(partialTwoOfThree.totalRuleCount, 3);
+
+  // All 3 genres present -> verified: true
+  const exactThreeOfThree = verifyMovieAgainstTmdbCategories(
+    { mediaType: "movie", tmdbGenreIds: [28, 878, 35] },
+    threeGenrePrefs
+  );
+  assert.equal(exactThreeOfThree.verified, true);
+  assert.equal(exactThreeOfThree.matchRatio, 1);
+
+  // Empty tmdbGenreIds with active genre rules MUST NOT get neutral verified=true pass
+  const emptyGenresCheck = verifyMovieAgainstTmdbCategories(
+    { title: "Unknown Unenriched Film 2025", mediaType: "movie", tmdbGenreIds: [] },
+    threeGenrePrefs
+  );
+  assert.equal(emptyGenresCheck.verified, false);
+  assert.equal(emptyGenresCheck.matchRatio, 0);
+
+  // TV Musikal must reject non-musical dramas/comedies when text metadata lacks musical cues
+  const nonMusicalTv = verifyMovieAgainstTmdbCategories(
+    {
+      title: "Breaking Bad",
+      mediaType: "tv",
+      tmdbGenreIds: [18, 80],
+      vibeTags: ["Kriminalmästerverk", "Spänning"],
+    },
+    { moods: [], genres: ["Musikal"], contents: [], frameworks: [], customText: "", mediaType: "tv" }
+  );
+  assert.equal(nonMusicalTv.verified, false);
+});
+
+test("AC1 & AC5: 5-suggestion flow returns 5 exact multi-category matches separately for movies and TV series", () => {
+  // Movies: Skräck + Komedi (5 exact movie matches exist)
+  const movieRes = generateSmartRecommendationsWithStatus(
+    [],
+    [],
+    {
+      moods: [],
+      genres: ["Skräck", "Komedi"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "movie",
+    }
+  );
+  assert.equal(movieRes.exactMatchesFound, true);
+  assert.equal(movieRes.fallbackMessage, undefined);
+  assert.equal(movieRes.recommendations.length, 5);
+  for (const rec of movieRes.recommendations) {
+    assert.equal(rec.mediaType, "movie");
+    const ids = new Set(rec.tmdbGenreIds || []);
+    assert.ok(ids.has(27), `${rec.title} must have Horror (27)`);
+    assert.ok(ids.has(35), `${rec.title} must have Comedy (35)`);
+  }
+
+  // Movies: 3 categories (Action + Sci-Fi + Komedi) -> still 5 exact matches
+  const movie3Res = generateSmartRecommendationsWithStatus(
+    [],
+    [],
+    {
+      moods: [],
+      genres: ["Action", "Sci-Fi", "Komedi"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "movie",
+    }
+  );
+  assert.equal(movie3Res.exactMatchesFound, true);
+  assert.equal(movie3Res.recommendations.length, 5);
+  for (const rec of movie3Res.recommendations) {
+    assert.equal(rec.mediaType, "movie");
+    const ids = new Set(rec.tmdbGenreIds || []);
+    assert.ok(ids.has(28) && ids.has(878) && ids.has(35), `${rec.title} must match Action, Sci-Fi & Comedy`);
+  }
+
+  // TV series: Animerat + Action (5 exact TV matches exist: Arcane, Invincible, Cyberpunk: Edgerunners, Castlevania, Blue Eye Samurai, Demon Slayer)
+  const tvRes = generateSmartRecommendationsWithStatus(
+    [],
+    [],
+    {
+      moods: [],
+      genres: ["Animerat", "Action"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "tv",
+    }
+  );
+  assert.equal(tvRes.exactMatchesFound, true);
+  assert.equal(tvRes.fallbackMessage, undefined);
+  assert.equal(tvRes.recommendations.length, 5);
+  for (const rec of tvRes.recommendations) {
+    assert.equal(rec.mediaType, "tv");
+    const ids = new Set(rec.tmdbGenreIds || []);
+    assert.ok(ids.has(16), `${rec.title} must have Animation (16)`);
+    assert.ok(ids.has(10759) || ids.has(28), `${rec.title} must have Action (10759/28)`);
+  }
+});
+
+test("AC2: Partial-match candidates are strictly excluded whenever exact matches exist (movies and TV)", () => {
+  const movieCandidates: MovieRecommendation[] = [
+    // High-rated partial matches (missing Komedi)
+    { id: "p1", title: "Partial Hit 1", year: "2022", runtime: "2 tim", mediaType: "movie", matchPercentage: 99, tmdbRating: 9.6, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [28, 878] },
+    { id: "p2", title: "Partial Hit 2", year: "2023", runtime: "2 tim", mediaType: "movie", matchPercentage: 98, tmdbRating: 9.4, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [28, 35] },
+    // 5 exact matches with lower ratings
+    { id: "e1", title: "Exact 1", year: "2021", runtime: "1 tim 55 min", mediaType: "movie", matchPercentage: 86, tmdbRating: 7.2, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [28, 878, 35] },
+    { id: "e2", title: "Exact 2", year: "2020", runtime: "1 tim 50 min", mediaType: "movie", matchPercentage: 85, tmdbRating: 7.1, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [28, 878, 35] },
+    { id: "e3", title: "Exact 3", year: "2019", runtime: "1 tim 45 min", mediaType: "movie", matchPercentage: 84, tmdbRating: 7.0, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [28, 878, 35] },
+    { id: "e4", title: "Exact 4", year: "2018", runtime: "1 tim 40 min", mediaType: "movie", matchPercentage: 83, tmdbRating: 6.9, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [28, 878, 35] },
+    { id: "e5", title: "Exact 5", year: "2017", runtime: "1 tim 38 min", mediaType: "movie", matchPercentage: 82, tmdbRating: 6.8, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [28, 878, 35] },
+  ];
+
+  const moviePrefs = {
+    moods: [],
+    genres: ["Action", "Sci-Fi", "Komedi"],
+    contents: [],
+    frameworks: [],
+    customText: "",
+    mediaType: "movie" as const,
+  };
+  const verifiedMovies = filterAndVerifyMoviesWithFallback(movieCandidates, moviePrefs);
+  assert.equal(verifiedMovies.exactMatchesFound, true);
+  assert.equal(verifiedMovies.items.length, 5);
+  assert.ok(verifiedMovies.items.every((m) => m.title.startsWith("Exact")));
+
+  const tvCandidates: MovieRecommendation[] = [
+    { id: "tp1", title: "Partial TV 1", year: "2022", runtime: "2 säsonger", mediaType: "tv", matchPercentage: 99, tmdbRating: 9.5, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [16, 18] },
+    { id: "te1", title: "Exact TV 1", year: "2021", runtime: "2 säsonger", mediaType: "tv", matchPercentage: 85, tmdbRating: 7.5, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [16, 10759, 10765] },
+    { id: "te2", title: "Exact TV 2", year: "2022", runtime: "1 säsong", mediaType: "tv", matchPercentage: 84, tmdbRating: 7.4, whyYouWillLikeIt: "", vibeTags: [], tmdbGenreIds: [16, 10759, 10765] },
+  ];
+  const tvPrefs = {
+    moods: [],
+    genres: ["Animerat", "Action", "Sci-Fi"],
+    contents: [],
+    frameworks: [],
+    customText: "",
+    mediaType: "tv" as const,
+  };
+  const verifiedTv = filterAndVerifyMoviesWithFallback(tvCandidates, tvPrefs);
+  assert.equal(verifiedTv.exactMatchesFound, true);
+  assert.deepEqual(
+    verifiedTv.items.map((t) => t.title),
+    ["Exact TV 1", "Exact TV 2"]
+  );
+});
+
+test("AC3: 0 exact matches triggers closest-match fallback with Swedish notice and 5 closest items (movies & TV)", () => {
+  const impossibleMovie = generateSmartRecommendationsWithStatus(
+    [],
+    [],
+    {
+      moods: [],
+      genres: ["Dokumentär", "Skräck", "Musikal"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "movie",
+    }
+  );
+  assert.equal(impossibleMovie.exactMatchesFound, false);
+  assert.equal(impossibleMovie.fallbackMessage, NO_EXACT_MATCH_FALLBACK_MESSAGE);
+  assert.equal(impossibleMovie.recommendations.length, 5);
+  assert.ok(impossibleMovie.recommendations.every((r) => r.mediaType === "movie"));
+
+  const impossibleTv = generateSmartRecommendationsWithStatus(
+    [],
+    [],
+    {
+      moods: [],
+      genres: ["Dokumentär", "Skräck", "Musikal"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "tv",
+    }
+  );
+  assert.equal(impossibleTv.exactMatchesFound, false);
+  assert.equal(impossibleTv.fallbackMessage, NO_EXACT_MATCH_FALLBACK_MESSAGE);
+  assert.equal(impossibleTv.recommendations.length, 5);
+  assert.ok(impossibleTv.recommendations.every((r) => r.mediaType === "tv"));
+});
+
+test("AC4: Taste profile and active watchlist weightings rank aligned candidates higher AND allow watchlist titles in 5 results", () => {
+  const darkProfileWatched: WatchedMovie[] = [
+    {
+      id: "w1",
+      title: "Prisoners",
+      mediaType: "movie",
+      rating: 5,
+      liked: true,
+      tags: ["Stämningen / Atmosfären", "Twisten / Slutet"],
+      addedAt: "2026-10-01",
+      tmdbGenreIds: [18, 53, 80],
+    },
+    {
+      id: "w2",
+      title: "Superbad",
+      mediaType: "movie",
+      rating: 1,
+      liked: false,
+      tags: ["Humorn & Lättheten"],
+      addedAt: "2026-10-02",
+      tmdbGenreIds: [35],
+    },
+  ];
+  const darkWatchlist: MovieRecommendation[] = [
+    {
+      id: "wl-dark",
+      title: "Blade Runner 2049",
+      year: "2017",
+      runtime: "2 tim 44 min",
+      mediaType: "movie",
+      matchPercentage: 90,
+      whyYouWillLikeIt: "Mörk neo-noir sci-fi",
+      vibeTags: ["Mörk", "Atmosfär", "Psykologisk"],
+      tmdbGenreIds: [878, 18],
+      tmdbGenres: ["Sci-Fi", "Drama"],
+    },
+  ];
+  const darkSummary =
+    "Du dras till mörk, psykologisk atmosfär och nervkittlande mysterier, men bör undvika lättsamma komedier och slapstick.";
+
+  const lightProfileWatched: WatchedMovie[] = [
+    {
+      id: "w3",
+      title: "Knives Out",
+      mediaType: "movie",
+      rating: 5,
+      liked: true,
+      tags: ["Humorn & Lättheten", "Manuset & Dialogen"],
+      addedAt: "2026-10-01",
+      tmdbGenreIds: [35, 80, 9648],
+    },
+    {
+      id: "w4",
+      title: "Se7en",
+      mediaType: "movie",
+      rating: 1,
+      liked: false,
+      tags: ["Stämningen / Atmosfären"],
+      addedAt: "2026-10-02",
+      tmdbGenreIds: [80, 53],
+    },
+  ];
+  const lightWatchlist: MovieRecommendation[] = [
+    {
+      id: "wl-light",
+      title: "Palm Springs",
+      year: "2020",
+      runtime: "1 tim 30 min",
+      mediaType: "movie",
+      matchPercentage: 90,
+      whyYouWillLikeIt: "Lättsam och rolig sci-fi-komedi",
+      vibeTags: ["Skrattfest", "Charmig", "Feelgood"],
+      tmdbGenreIds: [35, 878, 10749],
+      tmdbGenres: ["Komedi", "Sci-Fi", "Romantik"],
+    },
+  ];
+  const lightSummary =
+    "Du älskar varm humor, lekfull komedi och charmig dialog, men bör undvika becksvarta och råa filmer.";
+
+  // Two candidates both matching Action + Sci-Fi
+  const darkSciFiCandidate: MovieRecommendation = {
+    id: "cand-dark",
+    title: "Dark Cyber Runner",
+    year: "2020",
+    runtime: "2 tim 5 min",
+    mediaType: "movie",
+    matchPercentage: 88,
+    whyYouWillLikeIt: "Mörk, psykologisk sci-fi-action med tät atmosfär.",
+    vibeTags: ["Mörk", "Psykologisk", "Atmosfär"],
+    tmdbRating: 7.4,
+    tmdbGenreIds: [28, 878, 53],
+    tmdbGenres: ["Action", "Sci-Fi", "Thriller"],
+  };
+  const comedySciFiCandidate: MovieRecommendation = {
+    id: "cand-light",
+    title: "Cosmic Buddy Laughs",
+    year: "2021",
+    runtime: "1 tim 45 min",
+    mediaType: "movie",
+    matchPercentage: 88,
+    whyYouWillLikeIt: "Lättsam och rolig feelgood sci-fi-action med charm.",
+    vibeTags: ["Skrattfest", "Feelgood", "Charmig"],
+    tmdbRating: 7.8,
+    tmdbGenreIds: [28, 878, 35],
+    tmdbGenres: ["Action", "Sci-Fi", "Komedi"],
+  };
+
+  const actionSciFiPrefs = {
+    moods: [],
+    genres: ["Action", "Sci-Fi"],
+    contents: [],
+    frameworks: [],
+    customText: "",
+    mediaType: "movie" as const,
+  };
+
+  // Under dark profile + dark watchlist: darkSciFiCandidate MUST rank above comedySciFiCandidate
+  const darkScoreForDark = scoreCandidateForUserProfile(darkSciFiCandidate, {
+    watchedMovies: darkProfileWatched,
+    watchlist: darkWatchlist,
+    tasteProfileSummary: darkSummary,
+    preferences: actionSciFiPrefs,
+  });
+  const darkScoreForComedy = scoreCandidateForUserProfile(comedySciFiCandidate, {
+    watchedMovies: darkProfileWatched,
+    watchlist: darkWatchlist,
+    tasteProfileSummary: darkSummary,
+    preferences: actionSciFiPrefs,
+  });
+  assert.ok(
+    darkScoreForDark > darkScoreForComedy,
+    `Expected dark candidate (${darkScoreForDark}) > comedy candidate (${darkScoreForComedy}) for dark profile+watchlist`
+  );
+
+  // Under light profile + light watchlist: comedySciFiCandidate MUST rank above darkSciFiCandidate
+  const lightScoreForComedy = scoreCandidateForUserProfile(comedySciFiCandidate, {
+    watchedMovies: lightProfileWatched,
+    watchlist: lightWatchlist,
+    tasteProfileSummary: lightSummary,
+    preferences: actionSciFiPrefs,
+  });
+  const lightScoreForDark = scoreCandidateForUserProfile(darkSciFiCandidate, {
+    watchedMovies: lightProfileWatched,
+    watchlist: lightWatchlist,
+    tasteProfileSummary: lightSummary,
+    preferences: actionSciFiPrefs,
+  });
+  assert.ok(
+    lightScoreForComedy > lightScoreForDark,
+    `Expected comedy candidate (${lightScoreForComedy}) > dark candidate (${lightScoreForDark}) for light profile+watchlist`
+  );
+
+  // Verify buildHybridCandidatePool uses taste+watchlist ranking and allows watchlist items when excludeWatchlist=false
+  const watchlistHero: MovieRecommendation = {
+    id: "wl-hero",
+    title: "Edge of Tomorrow",
+    year: "2014",
+    runtime: "1 tim 53 min",
+    mediaType: "movie",
+    matchPercentage: 90,
+    whyYouWillLikeIt: "Action sci-fi tidsloop",
+    vibeTags: ["Tidsloop", "Mörk"],
+    tmdbId: 137113,
+    tmdbRating: 7.6,
+    tmdbGenreIds: [28, 878],
+    tmdbGenres: ["Action", "Sci-Fi"],
+  };
+  const hybridPool = buildHybridCandidatePool({
+    collaborativeCandidates: [],
+    discoveredCandidates: [comedySciFiCandidate, darkSciFiCandidate, watchlistHero],
+    watchedMovies: darkProfileWatched,
+    watchlist: [watchlistHero],
+    preferences: actionSciFiPrefs,
+    tasteProfileSummary: darkSummary,
+    excludeWatchlist: false,
+  });
+  assert.ok(
+    hybridPool.some((m) => m.title === "Edge of Tomorrow"),
+    "Watchlist title should be allowed in 5-suggestion pool when excludeWatchlist=false"
+  );
+  const darkIdx = hybridPool.findIndex((m) => m.title === "Dark Cyber Runner");
+  const lightIdx = hybridPool.findIndex((m) => m.title === "Cosmic Buddy Laughs");
+  assert.ok(darkIdx !== -1 && lightIdx !== -1 && darkIdx < lightIdx);
+
+  // Watchlist title IS allowed in generateSmartRecommendationsWithStatus for TV too
+  const tvWatchlistItem: MovieRecommendation = {
+    id: "wl-tv-1",
+    title: "Cyberpunk: Edgerunners",
+    year: "2022",
+    runtime: "1 säsong · 10 avsnitt",
+    mediaType: "tv",
+    matchPercentage: 95,
+    whyYouWillLikeIt: "Sparad animerad sci-fi-action",
+    vibeTags: ["Vuxenanimation", "Cyberpunk"],
+    tmdbId: 105248,
+    tmdbGenreIds: [16, 10765, 10759],
+    tmdbGenres: ["Animerat", "Sci-Fi & Fantasy", "Action & Äventyr"],
+  };
+  const tvWithWatchlist = generateSmartRecommendationsWithStatus(
+    [],
+    [tvWatchlistItem],
+    {
+      moods: [],
+      genres: ["Animerat", "Action"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "tv",
+    },
+    [],
+    [],
+    [],
+    "Jag älskar cyberpunk, mörk sci-fi och vuxenanimation."
+  );
+  assert.equal(tvWithWatchlist.recommendations.length, 5);
+  assert.ok(
+    tvWithWatchlist.recommendations.some(
+      (r) => r.title === "Cyberpunk: Edgerunners"
+    ),
+    "Matching watchlist series must be allowed among the 5 TV recommendations"
+  );
+
+  // RecommendedTab swipe-deck behavior preserved when excludeWatchlist is true (default)
+  const excludedForDeck = filterDuplicateRecommendations(
+    [tvWatchlistItem],
+    [],
+    [tvWatchlistItem]
+  );
+  assert.equal(excludedForDeck.length, 0);
+  const allowedForTonight = filterDuplicateRecommendations(
+    [tvWatchlistItem],
+    [],
+    [tvWatchlistItem],
+    [],
+    { excludeWatchlist: false }
+  );
+  assert.equal(allowedForTonight.length, 1);
+});
+
+test("Regression (M1-i2 Bug 1 & Minor 3): Sverige/Stockholm and Anime strictly reject missing originalLanguage and never leak non-Swedish titles", () => {
+  // Missing originalLanguage must fail Sverige, Stockholm, and Anime
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { title: "Unknown Drama Film", mediaType: "movie", tmdbGenreIds: [18] },
+      { moods: [], genres: ["Drama"], contents: [], frameworks: ["Sverige"], customText: "", mediaType: "movie" }
+    ).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { title: "Unknown Crime Series", mediaType: "tv", tmdbGenreIds: [80, 18] },
+      { moods: [], genres: ["Krim & Mysterium"], contents: [], frameworks: ["Stockholm"], customText: "", mediaType: "tv" }
+    ).verified,
+    false
+  );
+  assert.equal(
+    verifyMovieAgainstTmdbCategories(
+      { title: "Unknown Animated Film", mediaType: "movie", tmdbGenreIds: [16, 28] },
+      { moods: [], genres: ["Anime", "Action"], contents: [], frameworks: [], customText: "", mediaType: "movie" }
+    ).verified,
+    false
+  );
+
+  // Older CURATED_TMDB_MOVIES entries carry explicit mediaType: "movie" and originalLanguage
+  const darkKnight = lookupCuratedTmdbMovie("The Dark Knight");
+  assert.equal(darkKnight.mediaType, "movie");
+  assert.equal(darkKnight.originalLanguage, "en");
+
+  // Sverige + Drama (movie) returns only genuine Swedish films
+  const swedishMovies = generateSmartRecommendationsWithStatus(
+    [],
+    [],
+    { moods: [], genres: ["Drama"], contents: [], frameworks: ["Sverige"], customText: "", mediaType: "movie" }
+  );
+  assert.equal(swedishMovies.exactMatchesFound, true);
+  assert.equal(swedishMovies.recommendations.length, 5);
+  assert.ok(
+    swedishMovies.recommendations.every((r) => r.originalLanguage === "sv"),
+    `Expected all Sverige Drama results to have originalLanguage='sv', got: ${swedishMovies.recommendations.map((r) => `${r.title}(${r.originalLanguage})`).join(", ")}`
+  );
+
+  // Stockholm + Krim & Mysterium (tv) returns only genuine Swedish TV series (never Breaking Bad / The Sopranos)
+  const stockholmTv = generateSmartRecommendationsWithStatus(
+    [],
+    [],
+    { moods: [], genres: ["Krim & Mysterium"], contents: [], frameworks: ["Stockholm"], customText: "", mediaType: "tv" }
+  );
+  assert.equal(stockholmTv.exactMatchesFound, true);
+  assert.ok(stockholmTv.recommendations.length >= 2);
+  assert.ok(
+    stockholmTv.recommendations.every((r) => r.originalLanguage === "sv"),
+    `Expected only Swedish TV series for Stockholm, got: ${stockholmTv.recommendations.map((r) => r.title).join(", ")}`
+  );
+
+  // Sverige + Sci-Fi (movie) has 0 Swedish Sci-Fi movies -> closest-match fallback notice
+  const swedishSciFi = generateSmartRecommendationsWithStatus(
+    [],
+    [],
+    { moods: [], genres: ["Sci-Fi"], contents: [], frameworks: ["Sverige"], customText: "", mediaType: "movie" }
+  );
+  assert.equal(swedishSciFi.exactMatchesFound, false);
+  assert.equal(swedishSciFi.fallbackMessage, NO_EXACT_MATCH_FALLBACK_MESSAGE);
+  assert.equal(swedishSciFi.recommendations.length, 5);
+});
+
+test("Regression (M1-i2 Bug 2 & Minor 4): Custom enriched watchlist item ranks in top 5 and multi-sentence avoidance summary preserves subsequent positive cues", () => {
+  const customWatchlistItem: MovieRecommendation = {
+    id: "wl-custom-enriched",
+    title: "Custom Enriched Watchlist Thriller",
+    year: "2022",
+    runtime: "2 tim 4 min",
+    mediaType: "movie",
+    matchPercentage: 92,
+    whyYouWillLikeIt: "Mörk psykologisk kriminalgåta.",
+    vibeTags: ["Mörk", "Psykologisk", "Gåtfull"],
+    tmdbId: 888888,
+    tmdbRating: 8.6,
+    tmdbGenreIds: [18, 53, 80, 9648],
+    tmdbGenres: ["Drama", "Thriller", "Krim", "Mysterium"],
+  };
+
+  const res = generateSmartRecommendationsWithStatus(
+    [],
+    [customWatchlistItem],
+    {
+      moods: [],
+      genres: ["Drama", "Thriller & Spänning"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "movie",
+    },
+    [],
+    [],
+    [],
+    "Du bör undvika lättsamma komedier och slapstick. Du älskar däremot mörka, psykologiska kriminalmysterier."
+  );
+
+  assert.equal(res.exactMatchesFound, true);
+  assert.equal(res.recommendations.length, 5);
+  assert.ok(
+    res.recommendations.some((r) => r.title === "Custom Enriched Watchlist Thriller"),
+    `Expected custom enriched watchlist item in top 5, got: ${res.recommendations.map((r) => r.title).join(", ")}`
+  );
+
+  // Verify multi-sentence avoidance summary (avoidance first, positive second) scores dark sci-fi thriller > slapstick comedy
+  const darkSciFiCandidate: MovieRecommendation = {
+    id: "c-dark",
+    title: "Dark Sci-Fi Mystery",
+    year: "2021",
+    runtime: "2 tim",
+    mediaType: "movie",
+    matchPercentage: 88,
+    whyYouWillLikeIt: "Mörk, psykologisk sci-fi-thriller med gåtfull nerv.",
+    vibeTags: ["Mörk", "Psykologisk", "Gåta"],
+    tmdbRating: 7.6,
+    tmdbGenreIds: [878, 53, 9648],
+  };
+  const lightComedyCandidate: MovieRecommendation = {
+    id: "c-light",
+    title: "Light Slapstick Comedy",
+    year: "2021",
+    runtime: "1 tim 35 min",
+    mediaType: "movie",
+    matchPercentage: 88,
+    whyYouWillLikeIt: "Lättsam och rolig komedi med slapstick.",
+    vibeTags: ["Lättsam", "Slapstick", "Komedi"],
+    tmdbRating: 7.6,
+    tmdbGenreIds: [35],
+  };
+  const avoidanceFirstSummary =
+    "Du bör undvika lättsamma komedier och slapstick. Du älskar däremot mörk sci-fi och nervkittlande thrillers.";
+  const darkScore = scoreCandidateForUserProfile(darkSciFiCandidate, {
+    tasteProfileSummary: avoidanceFirstSummary,
+  });
+  const lightScore = scoreCandidateForUserProfile(lightComedyCandidate, {
+    tasteProfileSummary: avoidanceFirstSummary,
+  });
+  assert.ok(
+    darkScore > lightScore,
+    `Expected darkScore (${darkScore}) > lightScore (${lightScore}) when avoidance appears in sentence 1 and positive cues in sentence 2`
+  );
+});
+
+test("Regression (M1-i2 Bug 3): limitOnePerFranchise and generateSmartRecommendationsWithStatus preserve 5 exact matches across a franchise pair", () => {
+  const spiderVersePairPool = [
+    { title: "Spider-Man: Into the Spider-Verse" },
+    { title: "Spider-Man: Across the Spider-Verse" },
+    { title: "Inception" },
+    { title: "Mad Max: Fury Road" },
+    { title: "Edge of Tomorrow" },
+  ];
+  assert.equal(limitOnePerFranchise(spiderVersePairPool, 5).length, 5);
+  // Default preserveMinCount=0 still caps to 1 per franchise
+  assert.equal(limitOnePerFranchise(spiderVersePairPool).length, 4);
+
+  const excludeOtherActionSciFi = [
+    "Dune: Part Two",
+    "Everything Everywhere All at Once",
+    "Free Guy",
+    "Men in Black",
+    "Deadpool & Wolverine",
+    "The Adam Project",
+    "Akira",
+  ];
+  const res = generateSmartRecommendationsWithStatus(
+    [],
+    [],
+    {
+      moods: [],
+      genres: ["Action", "Sci-Fi"],
+      contents: [],
+      frameworks: [],
+      customText: "",
+      mediaType: "movie",
+    },
+    [],
+    excludeOtherActionSciFi
+  );
+  assert.equal(res.exactMatchesFound, true);
+  assert.equal(res.recommendations.length, 5);
+  assert.ok(
+    res.recommendations.some((r) => r.title === "Spider-Man: Into the Spider-Verse") &&
+      res.recommendations.some((r) => r.title === "Spider-Man: Across the Spider-Verse"),
+    `Expected both Spider-Verse exact matches preserved when only 5 exact matches remain, got: ${res.recommendations.map((r) => r.title).join(", ")}`
   );
 });

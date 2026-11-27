@@ -153,6 +153,8 @@ interface TonightTabProps {
   recommendations: MovieRecommendation[];
   isLoading: boolean;
   error: string | null;
+  fallbackNotice?: string | null;
+  onClearFallbackNotice?: () => void;
   onFindMovies: () => Promise<void> | void;
   onSteerFromMovie?: (steering: MovieSteeringContext) => Promise<void> | void;
   activeSteering?: MovieSteeringContext | null;
@@ -171,6 +173,8 @@ export const TonightTab: React.FC<TonightTabProps> = ({
   recommendations,
   isLoading,
   error,
+  fallbackNotice = null,
+  onClearFallbackNotice,
   onFindMovies,
   onSteerFromMovie,
   activeSteering = null,
@@ -314,6 +318,7 @@ export const TonightTab: React.FC<TonightTabProps> = ({
   };
 
   const resetFilters = () => {
+    onClearFallbackNotice?.();
     onChangePreferences({
       moods: [],
       genres: [],
@@ -1066,6 +1071,17 @@ export const TonightTab: React.FC<TonightTabProps> = ({
                   TMDB & Streaming SE
                 </span>
               </div>
+
+              {fallbackNotice && (
+                <div
+                  role="status"
+                  data-testid="fallback-notice-banner"
+                  className="px-3.5 py-2.5 rounded-xl bg-amber-500/15 border border-amber-500/40 text-xs font-medium text-amber-200 flex items-start gap-2.5"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <span>{fallbackNotice}</span>
+                </div>
+              )}
 
               {activeSteering && (
                 <div className="flex items-start justify-between gap-2.5 px-3.5 py-2.5 rounded-xl bg-[#e11d48]/10 border border-[#e11d48]/35 text-xs">

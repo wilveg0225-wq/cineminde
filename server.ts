@@ -26,7 +26,11 @@ import {
   parseTmdbTvAgeRating,
   inferAgeRatingFromGenres,
   filterAndVerifyMoviesByTmdbCategories,
+  filterAndVerifyMoviesWithFallback,
   limitAnimatedRecommendations,
+  NO_EXACT_MATCH_FALLBACK_MESSAGE,
+  scoreCandidateForUserProfile,
+  generateSmartRecommendationsWithStatus,
   normalizeProviderKey,
   movieMatchesStreamingProviders,
   extractTmdbVerificationRules,
@@ -387,12 +391,23 @@ async function fetchCollaborativeTmdbCandidates(
   dislikedCategories: string[] = [],
   previousTitles: string[] = [],
   page = 1,
-  limit = 25
+  limit = 25,
+  watchlist: MovieRecommendation[] = []
 ): Promise<MovieRecommendation[]> {
   try {
-    if (!watchedMovies || watchedMovies.length === 0) return [];
+    if (
+      (!watchedMovies || watchedMovies.length === 0) &&
+      (!watchlist || watchlist.length === 0)
+    ) {
+      return [];
+    }
     const effectiveMediaType = resolveEffectiveMediaType(preferences);
-    const seedMovies = selectFavoriteSeedsForTmdb(watchedMovies, effectiveMediaType, 5);
+    const seedMovies = selectFavoriteSeedsForTmdb(
+      watchedMovies,
+      effectiveMediaType,
+      5,
+      watchlist
+    );
     if (seedMovies.length === 0) return [];
 
     const resolvedSeeds = (
@@ -761,7 +776,8 @@ async function discoverTmdbCandidates(
   dislikedCategories: string[] = [],
   previousTitles: string[] = [],
   startPage = 1,
-  watchedMovies: WatchedMovie[] = []
+  watchedMovies: WatchedMovie[] = [],
+  watchlist: MovieRecommendation[] = []
 ): Promise<MovieRecommendation[]> {
   try {
     const hasProviders = selectedServices.length > 0;
@@ -931,11 +947,11 @@ async function discoverTmdbCandidates(
       }
 
       // If no specific evening filters were chosen (e.g. taste profile mode in "För dig"),
-      // derive target genres from the user's loved titles of the SAME mediaType first (separating movie vs TV taste)
+      // derive target genres from the user's loved titles & watchlist of the SAME mediaType first
       if (
         ruleTokens.length === 0 &&
         !hasExplicitEveningFilters &&
-        watchedMovies.length > 0
+        (watchedMovies.length > 0 || watchlist.length > 0)
       ) {
         const inferWatchedType = (m: WatchedMovie): "movie" | "tv" =>
           m.mediaType === "tv" ||
@@ -957,9 +973,27 @@ async function discoverTmdbCandidates(
             : watchedMovies;
         const genreCounts: Record<number, number> = {};
         for (const m of sourceMovies) {
-          for (const gid of m.tmdbGenreIds || []) {
+          const gids =
+            m.tmdbGenreIds && m.tmdbGenreIds.length > 0
+              ? m.tmdbGenreIds
+              : lookupCuratedTmdbMovie(m.originalTitle || m.title, m.year).tmdbGenreIds || [];
+          for (const gid of gids) {
             if (validSet.has(gid) && !dislikedGenreIds.includes(gid)) {
               genreCounts[gid] = (genreCounts[gid] || 0) + 1;
+            }
+          }
+        }
+        for (const wl of watchlist) {
+          const wlMeta = lookupCuratedTmdbMovie(wl.originalTitle || wl.title, wl.year);
+          const wlType = wl.mediaType || wlMeta.mediaType || "movie";
+          const weight = wlType === mediaType ? 2 : 1;
+          const gids =
+            wl.tmdbGenreIds && wl.tmdbGenreIds.length > 0
+              ? wl.tmdbGenreIds
+              : wlMeta.tmdbGenreIds || [];
+          for (const gid of gids) {
+            if (validSet.has(gid) && !dislikedGenreIds.includes(gid)) {
+              genreCounts[gid] = (genreCounts[gid] || 0) + weight;
             }
           }
         }
@@ -1410,7 +1444,8 @@ async function discoverTmdbCandidates(
       verifiedDiscovered,
       effectivePreferences,
       1,
-      watchedMovies
+      watchedMovies,
+      limit
     );
 
     return verifiedDiscovered.slice(0, limit);
@@ -1643,9 +1678,8 @@ async function enrichSingleMovieWithTmdb(
   }
 }
 
-async function startServer() {
+export function createApp(): express.Express {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
 
   // Lightweight health check endpoint for keep-alive cron jobs / Render monitors
   app.get(["/health", "/api/health"], (_req, res) => {
@@ -1821,6 +1855,7 @@ async function startServer() {
         limit = 5,
         dislikedCategories = [],
         dismissedMovies = [],
+        allowWatchlistInResults = true,
       } = req.body as {
         watchedMovies: WatchedMovie[];
         watchlist: MovieRecommendation[];
@@ -1830,6 +1865,7 @@ async function startServer() {
         limit?: number;
         dislikedCategories?: string[];
         dismissedMovies?: DismissedMovie[];
+        allowWatchlistInResults?: boolean;
       };
 
       const requestedLimit = Math.max(5, Math.min(15, Number(limit) || 5));
@@ -1918,11 +1954,13 @@ async function startServer() {
             ? rec.swedishProviders
             : meta.swedishProviders || rec.swedishProviders;
         const finalMediaType =
-          effectiveMediaType === "tv"
+          meta.mediaType ||
+          rec.mediaType ||
+          (effectiveMediaType === "tv"
             ? "tv"
             : effectiveMediaType === "movie"
             ? "movie"
-            : rec.mediaType || meta.mediaType || "movie";
+            : "movie");
         const finalSeasonCount =
           finalMediaType === "tv"
             ? meta.seasonCount ?? rec.seasonCount
@@ -1994,7 +2032,8 @@ async function startServer() {
             dislikedCategories,
             effectivePreviousTitles,
             requestPage,
-            watchedMovies
+            watchedMovies,
+            watchlist
           ),
           fetchCollaborativeTmdbCandidates(
             watchedMovies,
@@ -2003,7 +2042,8 @@ async function startServer() {
             dislikedCategories,
             effectivePreviousTitles,
             requestPage,
-            25
+            25,
+            watchlist
           ),
         ]);
         discoveredPool = discRes;
@@ -2043,6 +2083,9 @@ async function startServer() {
           dislikedCategories,
           preferences: verificationPreferences,
           maxCandidates: 30,
+          tasteProfileSummary,
+          excludeWatchlist: !allowWatchlistInResults,
+          dismissedMovies,
         });
       }
 
@@ -2055,7 +2098,8 @@ async function startServer() {
           effectivePreviousTitles,
           dislikedCategories,
           candidateTargetCount,
-          dismissedMovies
+          dismissedMovies,
+          allowWatchlistInResults
         );
 
         const candidatePoolPromptBlock = formatCandidatePoolForPrompt(
@@ -2131,7 +2175,11 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
                 ", "
               )}. Föreslå ALDRIG en titel som bara finns på andra streamingtjänster!`
             : ""
-        }${candidatePoolPromptBlock} Om användarens val tydligt pekar på en specifik titel (även om den redan är sedd), sätt den som #1 med isExactPinpointMatch: true. Annars ska du aldrig föreslå titlar som redan finns i sedda eller i watchlist. Svara ENDAST med en giltig JSON-array med ${candidateTargetCount} objekt.`;
+        }${candidatePoolPromptBlock} Om användarens val tydligt pekar på en specifik titel (även om den redan är sedd), sätt den som #1 med isExactPinpointMatch: true. ${
+          allowWatchlistInResults
+            ? "Annars ska du aldrig föreslå titlar som redan finns i sedda. Titlar från watchlist får föreslås om de passar."
+            : "Annars ska du aldrig föreslå titlar som redan finns i sedda eller i watchlist."
+        } Svara ENDAST med en giltig JSON-array med ${candidateTargetCount} objekt.`;
 
         try {
           const dynamicTemp = resolveRecommendationTemperature(effectivePreferences);
@@ -2162,15 +2210,15 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
                 const rt = String(item.runtime || "2 tim");
                 const rawMedia = String(item.mediaType || "").toLowerCase();
                 const inferredType: "movie" | "tv" =
-                  effectiveMediaType === "tv"
+                  rawMedia === "tv" ||
+                  rawMedia === "series" ||
+                  rt.toLowerCase().includes("säsong") ||
+                  rt.toLowerCase().includes("avsnitt") ||
+                  rt.toLowerCase().includes("miniserie")
                     ? "tv"
-                    : effectiveMediaType === "movie"
+                    : rawMedia === "movie"
                     ? "movie"
-                    : rawMedia === "tv" ||
-                      rawMedia === "series" ||
-                      rt.toLowerCase().includes("säsong") ||
-                      rt.toLowerCase().includes("avsnitt") ||
-                      rt.toLowerCase().includes("miniserie")
+                    : effectiveMediaType === "tv"
                     ? "tv"
                     : "movie";
 
@@ -2214,13 +2262,21 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
         }
       }
 
-      // Deduplicate AI recommendations FIRST without mixing generic discoveredPool into them
+      // Deduplicate AI recommendations FIRST and reject wrong mediaType before TMDB enrichment
       let uniqueAiRecs = filterDuplicateRecommendations(
         recommendations,
         watchedMovies,
         watchlist,
-        effectivePreviousTitles
-      ).slice(0, candidateTargetCount);
+        effectivePreviousTitles,
+        { excludeWatchlist: !allowWatchlistInResults }
+      )
+        .filter(
+          (r) =>
+            effectiveMediaType === "any" ||
+            !r.mediaType ||
+            r.mediaType === effectiveMediaType
+        )
+        .slice(0, candidateTargetCount);
 
       // Pre-hydrate AI picks that were selected from hybridCandidatePool with already-verified TMDB metadata
       if (hybridCandidatePool.length > 0 && uniqueAiRecs.length > 0) {
@@ -2260,299 +2316,249 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
         });
       }
 
-      // Enrich AI candidates with TMDB metadata (including seasonCount, runtimeMinutes, tvStatus)
-      const enrichedAiCandidates = await Promise.all(
-        uniqueAiRecs.map((rec) => enrichRec(rec))
+      // Enrich AI candidates with TMDB metadata (including mediaType, seasonCount, runtimeMinutes, tvStatus)
+      const enrichedAiCandidates = (
+        await Promise.all(uniqueAiRecs.map((rec) => enrichRec(rec)))
+      ).filter(
+        (r) =>
+          effectiveMediaType === "any" ||
+          !r.mediaType ||
+          r.mediaType === effectiveMediaType
       );
 
-      // Step 1: Verify AI candidates against official TMDB categories, release year, runtime & seasonCount
-      let verifiedCandidates: MovieRecommendation[] =
-        limitAnimatedRecommendations(
-          filterAndVerifyMoviesByTmdbCategories(
-            enrichedAiCandidates,
-            verificationPreferences
-          ),
-          effectivePreferences,
-          1,
-          watchedMovies
-        );
+      // Gather eligible candidates across AI, Hybrid/Discover, Broader Discover, and Local Curated/Fallback
+      const aiOriginNorms = new Set(
+        enrichedAiCandidates.map((r) => normalizeMovieTitle(r.title))
+      );
+      const hybridOriginNorms = new Set(
+        hybridCandidatePool.map((r) => normalizeMovieTitle(r.title))
+      );
 
-      // Step 1.5: Strictly filter out any candidates that match user's disliked categories
-      if (dislikedCategories.length > 0) {
-        verifiedCandidates = filterOutDislikedCategories(
-          verifiedCandidates,
-          dislikedCategories
+      let collectedPool: MovieRecommendation[] = [
+        ...enrichedAiCandidates,
+        ...hybridCandidatePool,
+        ...discoveredPool,
+      ];
+
+      // Also include eligible watchlist titles when allowWatchlistInResults is true
+      if (allowWatchlistInResults && watchlist.length > 0) {
+        const watchlistCandidates = await Promise.all(
+          watchlist
+            .filter((wl) => {
+              const norm = normalizeMovieTitle(wl.title);
+              if (!norm) return false;
+              const wlMeta = lookupCuratedTmdbMovie(wl.originalTitle || wl.title, wl.year);
+              const mt = wl.mediaType || wlMeta.mediaType || "movie";
+              if (effectiveMediaType !== "any" && mt !== effectiveMediaType) return false;
+              return true;
+            })
+            .slice(0, 10)
+            .map((wl) => enrichRec(wl))
         );
+        collectedPool.push(...watchlistCandidates);
       }
 
-      // Step 2: If streaming services are selected, strictly filter to those services
-      if (selectedServices.length > 0) {
-        verifiedCandidates = filterMoviesByStreamingServices(
-          verifiedCandidates,
-          selectedServices
-        );
-      }
-
-      // Step 3: ONLY if fewer than requestedLimit AI candidates survived, top up with 100% verified titles
-      if (verifiedCandidates.length < requestedLimit) {
-        // Priority 3A: Top up from Hybrid candidate pool (collaborative favorites + Discover, strictly verified)
-        const primaryTopUpPool =
-          hybridCandidatePool.length > 0 ? hybridCandidatePool : discoveredPool;
-        if (primaryTopUpPool.length > 0) {
-          const existingTitles = new Set([
-            ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
-            ...watchlist.map((m) => normalizeMovieTitle(m.title)),
-            ...verifiedCandidates.map((m) => normalizeMovieTitle(m.title)),
-            ...(effectivePreviousTitles || []).map((t) => normalizeMovieTitle(t)),
-          ]);
-          const unusedPool = primaryTopUpPool.filter((d) => {
-            const t1 = normalizeMovieTitle(d.title);
-            const t2 = normalizeMovieTitle(d.originalTitle);
-            return !existingTitles.has(t1) && !existingTitles.has(t2);
-          });
-          let verifiedPool = filterAndVerifyMoviesByTmdbCategories(
-            unusedPool,
-            verificationPreferences
-          );
-          if (dislikedCategories.length > 0) {
-            verifiedPool = filterOutDislikedCategories(
-              verifiedPool,
-              dislikedCategories
-            );
-          }
-          for (const cand of verifiedPool) {
-            if (verifiedCandidates.length >= requestedLimit) break;
-            verifiedCandidates.push(cand);
-            existingTitles.add(normalizeMovieTitle(cand.title));
-          }
-        }
-
-        // Priority 3B: If still fewer than requestedLimit, do a broader discover preserving hard length & era rules
-        if (verifiedCandidates.length < requestedLimit && tmdbKey) {
-          try {
-            const preservedMoods = (effectivePreferences.moods || []).filter((m) =>
-              [
-                "Max 90 min",
-                "Max 90 minuter",
-                "Max 2 tim",
-                "Max 2 timmar",
-                "Över 2 tim",
-                "2+ timmar (Långfilm)",
-                "Miniserie",
-                "1–2 säsonger",
-                "3–5 säsonger",
-                "6+ säsonger",
-                "Korta avsnitt",
-                "Avslutad serie",
-                "Serielängd",
-              ].includes(m)
-            );
-            const preservedFrameworks = (effectivePreferences.frameworks || []).filter(
-              (f) =>
-                [
-                  "2020-talet",
-                  "2010-talet",
-                  "2000-talet",
-                  "1990-talet",
-                  "1980-talet",
-                  "Före 1980",
-                  "Nyare än 2015",
-                  "Klassiker",
-                  "Sverige",
-                  "Norden",
-                  "Sverige & Norden",
-                  "Europa",
-                  "Stockholm",
-                  "London",
-                  "Tokyo",
-                ].includes(f)
-            );
-            const broaderPrefs: EveningPreferences = {
-              ...effectivePreferences,
-              moods: preservedMoods,
-              frameworks: preservedFrameworks,
-            };
-            const broaderPool = await discoverTmdbCandidates(
-              broaderPrefs,
-              selectedServices,
-              tmdbKey,
-              20,
-              dislikedCategories,
-              effectivePreviousTitles,
-              requestPage + 1
-            );
-            let verifiedBroader = filterAndVerifyMoviesByTmdbCategories(
-              broaderPool,
-              broaderPrefs
-            );
-            if (dislikedCategories.length > 0) {
-              verifiedBroader = filterOutDislikedCategories(
-                verifiedBroader,
-                dislikedCategories
-              );
-            }
-            const existingTitles = new Set([
-              ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
-              ...watchlist.map((m) => normalizeMovieTitle(m.title)),
-              ...verifiedCandidates.map((m) => normalizeMovieTitle(m.title)),
-              ...(effectivePreviousTitles || []).map((t) => normalizeMovieTitle(t)),
-            ]);
-            for (const cand of verifiedBroader) {
-              const t1 = normalizeMovieTitle(cand.title);
-              const t2 = normalizeMovieTitle(cand.originalTitle);
-              if (!existingTitles.has(t1) && !existingTitles.has(t2)) {
-                verifiedCandidates.push(cand);
-                existingTitles.add(t1);
-                if (verifiedCandidates.length >= requestedLimit) break;
-              }
-            }
-          } catch {
-            // Proceed to local fallbacks
-          }
-        }
-
-        // Priority 3C: Local curated fallbacks (strictly matching streaming services if specified)
-        if (verifiedCandidates.length < requestedLimit) {
-          const extraFallbacks = generateSmartFallbackRecommendations(
-            watchedMovies,
-            [...watchlist, ...verifiedCandidates],
-            effectivePreferences,
-            dislikedCategories,
-            effectivePreviousTitles
-          );
-          const enrichedExtra = await Promise.all(
-            extraFallbacks.map((rec) => enrichRec(rec))
-          );
-          let verifiedExtra: MovieRecommendation[] =
-            filterAndVerifyMoviesByTmdbCategories(
-              enrichedExtra,
-              verificationPreferences
-            );
-          if (dislikedCategories.length > 0) {
-            verifiedExtra = filterOutDislikedCategories(
-              verifiedExtra,
-              dislikedCategories
-            );
-          }
-          if (selectedServices.length > 0) {
-            verifiedExtra = filterMoviesByStreamingServices(
-              verifiedExtra,
-              selectedServices
-            );
-          }
-          verifiedCandidates = filterDuplicateRecommendations(
-            [...verifiedCandidates, ...verifiedExtra],
-            watchedMovies,
-            watchlist,
-            effectivePreviousTitles
-          );
-        }
-      }
-
-      // Final safeguard: if verifiedCandidates is still completely empty, supply smart fallbacks
-      if (verifiedCandidates.length === 0) {
-        verifiedCandidates = generateSmartFallbackRecommendations(
+      const cleanCandidateList = (list: MovieRecommendation[]) => {
+        let filtered = filterDuplicateRecommendations(
+          list,
           watchedMovies,
           watchlist,
-          effectivePreferences,
+          effectivePreviousTitles,
+          { excludeWatchlist: !allowWatchlistInResults }
+        ).filter(
+          (r) =>
+            effectiveMediaType === "any" ||
+            !r.mediaType ||
+            r.mediaType === effectiveMediaType
+        );
+        if (dislikedCategories.length > 0) {
+          filtered = filterOutDislikedCategories(filtered, dislikedCategories);
+        }
+        if (selectedServices.length > 0) {
+          filtered = filterMoviesByStreamingServices(filtered, selectedServices);
+        }
+        return filtered;
+      };
+
+      let cleanedPool = cleanCandidateList(collectedPool);
+      const scoreWithProfile = (rec: MovieRecommendation): number => {
+        const profileScore = scoreCandidateForUserProfile(rec, {
+          watchedMovies,
+          watchlist,
+          tasteProfileSummary,
+          preferences: effectivePreferences,
           dislikedCategories,
-          effectivePreviousTitles
+          dismissedMovies,
+        });
+        const norm = normalizeMovieTitle(rec.title);
+        const originBonus = aiOriginNorms.has(norm)
+          ? 2
+          : hybridOriginNorms.has(norm)
+          ? 1.5
+          : 0;
+        return profileScore + originBonus;
+      };
+
+      // Check strict exact matches so far
+      let evaluatedResult = filterAndVerifyMoviesWithFallback(
+        cleanedPool,
+        verificationPreferences,
+        { scorer: scoreWithProfile }
+      );
+
+      // If fewer than requestedLimit exact matches exist, try broader TMDB Discover (if tmdbKey) + local smart catalog
+      if (
+        (!evaluatedResult.exactMatchesFound ||
+          evaluatedResult.items.length < requestedLimit) &&
+        tmdbKey
+      ) {
+        try {
+          const broaderPool = await discoverTmdbCandidates(
+            verificationPreferences,
+            selectedServices,
+            tmdbKey,
+            25,
+            dislikedCategories,
+            effectivePreviousTitles,
+            requestPage + 1,
+            watchedMovies,
+            watchlist
+          );
+          if (broaderPool.length > 0) {
+            collectedPool.push(...broaderPool);
+            cleanedPool = cleanCandidateList(collectedPool);
+            evaluatedResult = filterAndVerifyMoviesWithFallback(
+              cleanedPool,
+              verificationPreferences,
+              { scorer: scoreWithProfile }
+            );
+          }
+        } catch {
+          // Proceed to local curated/fallback pool
+        }
+      }
+
+      const localExcludedTitles = allowWatchlistInResults
+        ? effectivePreviousTitles
+        : [
+            ...effectivePreviousTitles,
+            ...watchlist.flatMap((w) =>
+              w.originalTitle && w.originalTitle !== w.title
+                ? [w.title, w.originalTitle]
+                : [w.title]
+            ),
+          ];
+
+      const localSmart = generateSmartRecommendationsWithStatus(
+        watchedMovies,
+        watchlist,
+        effectivePreferences,
+        dislikedCategories,
+        localExcludedTitles,
+        dismissedMovies,
+        tasteProfileSummary
+      );
+      const enrichedLocal = await Promise.all(
+        localSmart.recommendations.map((rec) => enrichRec(rec))
+      );
+      const cleanedLocal = cleanCandidateList(enrichedLocal);
+
+      if (
+        !evaluatedResult.exactMatchesFound ||
+        evaluatedResult.items.length < requestedLimit
+      ) {
+        collectedPool.push(...cleanedLocal);
+        cleanedPool = cleanCandidateList(collectedPool);
+        evaluatedResult = filterAndVerifyMoviesWithFallback(
+          cleanedPool,
+          verificationPreferences,
+          {
+            supplementaryCandidates: cleanedLocal,
+            scorer: scoreWithProfile,
+          }
         );
       }
 
-      if (dislikedCategories.length > 0) {
-        verifiedCandidates = filterOutDislikedCategories(
-          verifiedCandidates,
-          dislikedCategories
-        );
+      // Final safeguard if cleanedPool had 0 candidates (e.g. overly restrictive streaming filter)
+      if (evaluatedResult.items.length === 0 && localSmart.recommendations.length > 0) {
+        const safeFallbackItems = allowWatchlistInResults
+          ? localSmart.recommendations
+          : filterDuplicateRecommendations(
+              localSmart.recommendations,
+              watchedMovies,
+              watchlist,
+              effectivePreviousTitles,
+              { excludeWatchlist: true }
+            );
+        evaluatedResult = {
+          items: safeFallbackItems,
+          exactMatchesFound: localSmart.exactMatchesFound,
+          fallbackMessage: localSmart.fallbackMessage,
+        };
       }
 
-      // Strict guarantee: never re-serve a movie present in previousTitles (or anchor movie), deduplicate by normalized title, AND enforce max 1 movie per franchise
       const previousNorms = new Set(
         (effectivePreviousTitles || [])
           .map((t) => normalizeMovieTitle(t))
           .filter(Boolean)
       );
-      const dedupeVerified = (list: MovieRecommendation[], enforceFranchise = true) => {
+      const dedupeVerified = (
+        list: MovieRecommendation[],
+        enforceFranchise = true,
+        preserveMinCount = 0
+      ) => {
         const seen = new Set<string>();
+        const seenIds = new Set<number>();
         const seenFranchises = new Set<string>();
-        return list.filter((m) => {
+        const result: MovieRecommendation[] = [];
+        const franchiseOverflow: MovieRecommendation[] = [];
+
+        for (const m of list) {
           const t1 = normalizeMovieTitle(m.title);
           const t2 = m.originalTitle ? normalizeMovieTitle(m.originalTitle) : "";
-          if (previousNorms.has(t1) || (t2 && previousNorms.has(t2))) return false;
-          if (t1 && seen.has(t1)) return false;
+          if (previousNorms.has(t1) || (t2 && previousNorms.has(t2))) continue;
+          if ((t1 && seen.has(t1)) || (t2 && seen.has(t2))) continue;
+          if (m.tmdbId && seenIds.has(m.tmdbId)) continue;
+
           if (enforceFranchise && !m.isExactPinpointMatch) {
             const fKey = getMovieFranchiseKey(m.title, m.originalTitle);
-            if (fKey && seenFranchises.has(fKey)) return false;
+            if (fKey && seenFranchises.has(fKey)) {
+              franchiseOverflow.push(m);
+              continue;
+            }
             if (fKey) seenFranchises.add(fKey);
           }
-          if (t1) seen.add(t1);
-          return true;
-        });
-      };
-      verifiedCandidates = limitAnimatedRecommendations(
-        dedupeVerified(verifiedCandidates, true),
-        effectivePreferences,
-        1,
-        watchedMovies
-      );
 
-      // If deduplication reduced count below requestedLimit, top up from remaining discoveredPool or fallbacks
-      if (verifiedCandidates.length < requestedLimit) {
-        const existingNorms = new Set([
-          ...previousNorms,
-          ...watchedMovies.map((m) => normalizeMovieTitle(m.title)),
-          ...watchlist.map((m) => normalizeMovieTitle(m.title)),
-          ...verifiedCandidates.map((m) => normalizeMovieTitle(m.title)),
-        ]);
-        const existingFranchises = new Set(
-          verifiedCandidates
-            .map((m) => getMovieFranchiseKey(m.title, m.originalTitle))
-            .filter(Boolean)
-        );
-        const topUpSource =
-          hybridCandidatePool.length > 0 ? hybridCandidatePool : discoveredPool;
-        for (const d of topUpSource) {
-          if (verifiedCandidates.length >= requestedLimit) break;
-          const t1 = normalizeMovieTitle(d.title);
-          const t2 = d.originalTitle ? normalizeMovieTitle(d.originalTitle) : "";
-          const fKey = getMovieFranchiseKey(d.title, d.originalTitle);
-          if (
-            !existingNorms.has(t1) &&
-            (!t2 || !existingNorms.has(t2)) &&
-            (!fKey || !existingFranchises.has(fKey))
-          ) {
-            verifiedCandidates.push(d);
-            existingNorms.add(t1);
-            if (fKey) existingFranchises.add(fKey);
+          if (t1) seen.add(t1);
+          if (t2) seen.add(t2);
+          if (m.tmdbId) seenIds.add(m.tmdbId);
+          result.push(m);
+        }
+
+        if (preserveMinCount > 0) {
+          for (const extra of franchiseOverflow) {
+            if (result.length >= preserveMinCount) break;
+            const t1 = normalizeMovieTitle(extra.title);
+            const t2 = extra.originalTitle ? normalizeMovieTitle(extra.originalTitle) : "";
+            if ((t1 && seen.has(t1)) || (t2 && seen.has(t2))) continue;
+            if (extra.tmdbId && seenIds.has(extra.tmdbId)) continue;
+            if (t1) seen.add(t1);
+            if (t2) seen.add(t2);
+            if (extra.tmdbId) seenIds.add(extra.tmdbId);
+            result.push(extra);
           }
         }
-        if (verifiedCandidates.length < requestedLimit) {
-          const lastResort = generateSmartFallbackRecommendations(
-            watchedMovies,
-            [...watchlist, ...verifiedCandidates],
-            effectivePreferences,
-            dislikedCategories,
-            effectivePreviousTitles
-          );
-          for (const fb of lastResort) {
-            if (verifiedCandidates.length >= requestedLimit) break;
-            const t1 = normalizeMovieTitle(fb.title);
-            const fKey = getMovieFranchiseKey(fb.title, fb.originalTitle);
-            if (!existingNorms.has(t1) && (!fKey || !existingFranchises.has(fKey))) {
-              verifiedCandidates.push(fb);
-              existingNorms.add(t1);
-              if (fKey) existingFranchises.add(fKey);
-            }
-          }
-        }
-        verifiedCandidates = limitAnimatedRecommendations(
-        dedupeVerified(verifiedCandidates, true),
+
+        return result;
+      };
+
+      const verifiedCandidates = limitAnimatedRecommendations(
+        dedupeVerified(evaluatedResult.items, true, requestedLimit),
         effectivePreferences,
         1,
-        watchedMovies
+        watchedMovies,
+        requestedLimit
       );
-      }
 
       const finalRecs = await Promise.all(
         verifiedCandidates.slice(0, requestedLimit).map(async (rec) => {
@@ -2644,7 +2650,16 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
         })
       );
 
-      res.json({ recommendations: finalRecs });
+      res.json({
+        recommendations: finalRecs,
+        exactMatchesFound: evaluatedResult.exactMatchesFound,
+        ...(evaluatedResult.exactMatchesFound
+          ? {}
+          : {
+              fallbackMessage:
+                evaluatedResult.fallbackMessage || NO_EXACT_MATCH_FALLBACK_MESSAGE,
+            }),
+      });
     } catch {
       res.status(500).json({
         error: "Kunde inte generera filmrekommendationer just nu.",
@@ -2760,6 +2775,13 @@ Svara ENDAST med ett JSON-objekt på formatet: {"summary": "Din personliga samma
     }
   });
 
+  return app;
+}
+
+export async function startServer() {
+  const app = createApp();
+  const PORT = Number(process.env.PORT) || 3000;
+
   const distPath = path.join(__dirname, "dist");
   const isProduction =
     process.env.NODE_ENV === "production" ||
@@ -2784,4 +2806,10 @@ Svara ENDAST med ett JSON-objekt på formatet: {"summary": "Din personliga samma
   });
 }
 
-startServer();
+const isMainModule =
+  Boolean(process.argv[1]) &&
+  path.resolve(process.argv[1]) === path.resolve(__filename);
+
+if (isMainModule) {
+  void startServer();
+}

@@ -206,6 +206,7 @@ export const RecommendedTab: React.FC<RecommendedTabProps> = ({
             previousTitles,
             page,
             limit: 12,
+            allowWatchlistInResults: false,
           }),
         });
 

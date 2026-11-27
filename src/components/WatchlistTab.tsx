@@ -134,6 +134,9 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({
       posterPath: hit.posterPath,
       tmdbRating: hit.voteAverage,
       swedishProviders: hit.swedishProviders,
+      tmdbGenreIds: hit.tmdbGenreIds,
+      tmdbGenres: hit.tmdbGenres,
+      seasonCount: hit.seasonCount,
       ageRating: hit.ageRating,
     });
   };
@@ -172,6 +175,9 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({
       posterPath: meta.posterPath,
       tmdbRating: meta.voteAverage,
       swedishProviders: meta.swedishProviders,
+      tmdbGenreIds: meta.tmdbGenreIds,
+      tmdbGenres: meta.tmdbGenres,
+      seasonCount: meta.seasonCount,
       ageRating: meta.ageRating,
     });
   };
