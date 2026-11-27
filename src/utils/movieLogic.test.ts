@@ -19,6 +19,7 @@ import {
   filterAndVerifyMoviesByTmdbCategories,
   filterAndVerifyMoviesWithFallback,
   limitAnimatedRecommendations,
+  limitEastAsianRecommendations,
   verifyMovieAgainstTmdbCategories,
   NO_EXACT_MATCH_FALLBACK_MESSAGE,
   scoreCandidateForUserProfile,
@@ -2850,4 +2851,71 @@ test("Regression (M1-i2 Bug 3): limitOnePerFranchise and generateSmartRecommenda
       res.recommendations.some((r) => r.title === "Spider-Man: Across the Spider-Verse"),
     `Expected both Spider-Verse exact matches preserved when only 5 exact matches remain, got: ${res.recommendations.map((r) => r.title).join(", ")}`
   );
+});
+
+test("Strict Sci-Fi + Thriller movie verification requires BOTH Sci-Fi (878) and Thriller (53) and rejects Sci-Fi + Crime (80)", () => {
+  const sciFiThrillerPrefs = {
+    moods: [],
+    genres: ["Sci-Fi", "Thriller & Spänning"],
+    contents: [],
+    frameworks: [],
+    customText: "",
+    mediaType: "movie" as const,
+  };
+
+  const sciFiAndThriller = verifyMovieAgainstTmdbCategories(
+    { title: "Ex Machina", mediaType: "movie", tmdbGenreIds: [18, 878, 53] },
+    sciFiThrillerPrefs
+  );
+  const sciFiOnly = verifyMovieAgainstTmdbCategories(
+    { title: "Interstellar", mediaType: "movie", tmdbGenreIds: [12, 18, 878] },
+    sciFiThrillerPrefs
+  );
+  const thrillerOnly = verifyMovieAgainstTmdbCategories(
+    { title: "Prisoners", mediaType: "movie", tmdbGenreIds: [18, 53, 80] },
+    sciFiThrillerPrefs
+  );
+  const sciFiAndCrimeNoThriller = verifyMovieAgainstTmdbCategories(
+    { title: "Sci-Fi Crime Only", mediaType: "movie", tmdbGenreIds: [878, 80] },
+    sciFiThrillerPrefs
+  );
+
+  assert.equal(sciFiAndThriller.verified, true);
+  assert.equal(sciFiOnly.verified, false);
+  assert.equal(thrillerOnly.verified, false);
+  assert.equal(
+    sciFiAndCrimeNoThriller.verified,
+    false,
+    "A movie with Sci-Fi + Crime (80) but WITHOUT Thriller (53) must NOT pass Sci-Fi + Thriller"
+  );
+});
+
+test("limitEastAsianRecommendations prevents Korean/Japanese flood unless explicitly requested", () => {
+  const mixedPool = [
+    { title: "K-Drama 1", originalLanguage: "ko" },
+    { title: "J-Thriller 1", originalLanguage: "ja" },
+    { title: "Ex Machina", originalLanguage: "en" },
+    { title: "Arrival", originalLanguage: "en" },
+    { title: "Dark", originalLanguage: "de" },
+    { title: "Bron", originalLanguage: "sv" },
+    { title: "Severance", originalLanguage: "en" },
+  ];
+  const neutralPrefs = {
+    moods: [],
+    genres: ["Sci-Fi", "Thriller & Spänning"],
+    contents: [],
+    frameworks: [],
+    customText: "",
+  };
+  const balanced = limitEastAsianRecommendations(mixedPool, neutralPrefs, 0, 5);
+  assert.equal(balanced.length, 5);
+  assert.ok(
+    balanced.every((m) => m.originalLanguage !== "ko" && m.originalLanguage !== "ja"),
+    "Should exclude ko/ja titles when 5 non-ko/ja matches exist and user did not ask for Korean/Japanese"
+  );
+
+  const koreanPrefs = { ...neutralPrefs, customText: "koreansk thriller" };
+  const keptKorean = limitEastAsianRecommendations(mixedPool, koreanPrefs, 0, 5);
+  assert.equal(keptKorean.length, mixedPool.length);
+  assert.equal(keptKorean[0].originalLanguage, "ko");
 });

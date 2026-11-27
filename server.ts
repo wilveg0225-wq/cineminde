@@ -28,6 +28,8 @@ import {
   filterAndVerifyMoviesByTmdbCategories,
   filterAndVerifyMoviesWithFallback,
   limitAnimatedRecommendations,
+  hasExplicitKoreanOrJapanesePreference,
+  limitEastAsianRecommendations,
   NO_EXACT_MATCH_FALLBACK_MESSAGE,
   scoreCandidateForUserProfile,
   generateSmartRecommendationsWithStatus,
@@ -574,6 +576,12 @@ async function fetchCollaborativeTmdbCandidates(
     if (dislikedCategories.length > 0) {
       filtered = filterOutDislikedCategories(filtered, dislikedCategories);
     }
+    filtered = limitEastAsianRecommendations(
+      filtered,
+      effectivePreferences,
+      0,
+      limit
+    );
 
     // Resolve non-Latin titles for top candidates
     const topSlice = filtered.slice(0, limit);
@@ -825,6 +833,12 @@ async function discoverTmdbCandidates(
     const isRegionalFilter =
       discoverFilters.originCountries.length > 0 ||
       discoverFilters.originalLanguages.length > 0;
+    const defaultWesternLangParam =
+      !isRegionalFilter && !hasExplicitKoreanOrJapanesePreference(effectivePreferences)
+        ? `&with_original_language=${encodeURIComponent(
+            "en|sv|no|da|fi|de|fr|es|it"
+          )}`
+        : "";
 
     // Build keyword & company query strings
     const companyParam =
@@ -926,7 +940,11 @@ async function discoverTmdbCandidates(
       // Comma-separated genre rule tokens enforce AND-logic across distinct chosen categories
       const ruleTokens: string[] = [];
       for (const rule of genreRules) {
-        const matchingIds = rule.allowedGenreIds.filter((gid) =>
+        const candidateIds =
+          mediaType === "movie" && rule.id === "thriller"
+            ? [53]
+            : rule.allowedGenreIds;
+        const matchingIds = candidateIds.filter((gid) =>
           validSet.has(gid)
         );
         if (matchingIds.length > 0) {
@@ -1089,7 +1107,8 @@ async function discoverTmdbCandidates(
       for (let p = initialPage; p < initialPage + maxPagesToFetch; p++) {
         if (discovered.length >= (discoverFilters.tvShortSeries ? 50 : limit * 2)) break;
 
-        const baseUrl = `/discover/${mediaType}?language=sv-SE&include_adult=false&sort_by=${sortBy}&vote_count.gte=${voteCountMin}${voteCountMaxParam}${voteAvgParam}&page=${p}${watchParam}${withoutGenreParam}${withoutKeywordParam}${yearParam}${originCountryParam}${originalLangParam}${companyParam}${variantExtra}`;
+        const effectiveLangParam = originalLangParam || defaultWesternLangParam;
+        const baseUrl = `/discover/${mediaType}?language=sv-SE&include_adult=false&sort_by=${sortBy}&vote_count.gte=${voteCountMin}${voteCountMaxParam}${voteAvgParam}&page=${p}${watchParam}${withoutGenreParam}${withoutKeywordParam}${yearParam}${originCountryParam}${effectiveLangParam}${companyParam}${variantExtra}`;
         let url = `${baseUrl}${genreParam}${keywordParam}`;
 
         let data: { results?: Array<Record<string, unknown>> } | null = null;
@@ -1099,6 +1118,34 @@ async function discoverTmdbCandidates(
           };
         } catch {
           continue;
+        }
+
+        // If default Western/Nordic language preference returned too few hits on page 1,
+        // retry without defaultWesternLangParam so rare combinations never come up empty.
+        if (
+          p === initialPage &&
+          defaultWesternLangParam &&
+          (!data?.results || data.results.length < 5)
+        ) {
+          const broaderLangUrl = url.replace(defaultWesternLangParam, "");
+          try {
+            const broaderLangData = (await fetchFromTmdbApi(
+              broaderLangUrl,
+              tmdbKey
+            )) as { results?: Array<Record<string, unknown>> };
+            if (broaderLangData?.results && broaderLangData.results.length > 0) {
+              const existing = data?.results || [];
+              const existingIds = new Set(existing.map((r) => r.id));
+              data = {
+                results: [
+                  ...existing,
+                  ...broaderLangData.results.filter((r) => !existingIds.has(r.id)),
+                ],
+              };
+            }
+          } catch {
+            // Keep existing
+          }
         }
 
         // On subsequent pages (p > initialPage), never relax/drop strict filters; stop paging instead
@@ -1445,6 +1492,12 @@ async function discoverTmdbCandidates(
       effectivePreferences,
       1,
       watchedMovies,
+      limit
+    );
+    verifiedDiscovered = limitEastAsianRecommendations(
+      verifiedDiscovered,
+      effectivePreferences,
+      0,
       limit
     );
 
@@ -1997,6 +2050,15 @@ export function createApp(): express.Express {
             ? meta.title
             : rec.title;
 
+        const finalGenreIds =
+          meta.tmdbGenreIds && meta.tmdbGenreIds.length > 0
+            ? meta.tmdbGenreIds
+            : rec.tmdbGenreIds;
+        const finalGenres =
+          finalGenreIds && finalGenreIds.length > 0
+            ? mapTmdbGenreIdsToNames(finalGenreIds)
+            : meta.tmdbGenres || rec.tmdbGenres;
+
         return {
           ...rec,
           title: finalTitle,
@@ -2012,8 +2074,8 @@ export function createApp(): express.Express {
           posterPath: finalPoster,
           tmdbRating: finalRating,
           swedishProviders: finalProviders,
-          tmdbGenreIds: meta.tmdbGenreIds || rec.tmdbGenreIds,
-          tmdbGenres: meta.tmdbGenres || rec.tmdbGenres,
+          tmdbGenreIds: finalGenreIds,
+          tmdbGenres: finalGenres,
           ageRating: meta.ageRating || rec.ageRating,
         };
       };
@@ -2174,6 +2236,10 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
             ? ` HÅRT KRAV FÖR STREAMING: Samtliga ${candidateTargetCount} titlar MÅSTE finnas tillgängliga i Sverige på minst en av följande valda tjänster: ${selectedServices.join(
                 ", "
               )}. Föreslå ALDRIG en titel som bara finns på andra streamingtjänster!`
+            : ""
+        }${
+          !hasExplicitKoreanOrJapanesePreference(effectivePreferences)
+            ? " SPRÅKBALANS: Prioritera engelskspråkiga, nordiska och europeiska titlar – översvämma INTE förslagen med koreanska eller japanska filmer/serier om användaren inte uttryckligen bett om det."
             : ""
         }${candidatePoolPromptBlock} Om användarens val tydligt pekar på en specifik titel (även om den redan är sedd), sätt den som #1 med isExactPinpointMatch: true. ${
           allowWatchlistInResults
@@ -2552,11 +2618,16 @@ VIKTIG REGEL MOT KLYSCHOR & UPPENBARA STANDARDVAL: Föreslå INTE bara de mest f
         return result;
       };
 
-      const verifiedCandidates = limitAnimatedRecommendations(
-        dedupeVerified(evaluatedResult.items, true, requestedLimit),
+      const verifiedCandidates = limitEastAsianRecommendations(
+        limitAnimatedRecommendations(
+          dedupeVerified(evaluatedResult.items, true, requestedLimit),
+          effectivePreferences,
+          1,
+          watchedMovies,
+          requestedLimit
+        ),
         effectivePreferences,
-        1,
-        watchedMovies,
+        0,
         requestedLimit
       );
 

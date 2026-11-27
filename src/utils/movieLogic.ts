@@ -1133,6 +1133,87 @@ export function hasExplicitJapaneseAnimePreference(
   return false;
 }
 
+export function hasExplicitKoreanOrJapanesePreference(
+  preferences?: EveningPreferences
+): boolean {
+  if (!preferences) return false;
+  if (hasExplicitJapaneseAnimePreference(preferences)) return true;
+  const allSelected = [
+    ...(preferences.genres || []),
+    ...(preferences.contents || []),
+    ...(preferences.frameworks || []),
+    ...(preferences.moods || []),
+  ];
+  if (allSelected.some((c) => ["Tokyo", "Japan", "Korea", "Sydkorea", "Asien"].includes(c))) {
+    return true;
+  }
+  const customLower = (preferences.customText || "").toLowerCase();
+  if (
+    customLower &&
+    /\b(korea|koreansk|koreanska|k-drama|kdrama|seoul|japan|japansk|japanska|j-drama|jdrama|tokyo|anime|ghibli|manga|asiatisk|asiatiska|asien)\b/i.test(
+      customLower
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function isKoreanOrJapaneseCandidate(candidate: {
+  originalLanguage?: string;
+  title?: string;
+  originalTitle?: string;
+  year?: string;
+}): boolean {
+  const lang = resolveCandidateOriginalLanguage(candidate);
+  if (lang === "ko" || lang === "ja") return true;
+  const rawTitle = `${candidate.originalTitle || ""} ${candidate.title || ""}`;
+  // Hangul (Korean) or Hiragana/Katakana (Japanese) script detection as fallback
+  if (/[\uAC00-\uD7AF\u3040-\u30FF]/.test(rawTitle)) {
+    return true;
+  }
+  return false;
+}
+
+export function limitEastAsianRecommendations<
+  T extends {
+    originalLanguage?: string;
+    title?: string;
+    originalTitle?: string;
+    year?: string;
+  }
+>(
+  movies: T[],
+  preferences: EveningPreferences,
+  maxCount = 0,
+  preserveMinCount = 0
+): T[] {
+  if (hasExplicitKoreanOrJapanesePreference(preferences)) {
+    return movies;
+  }
+  let eaCount = 0;
+  const kept: T[] = [];
+  const skipped: T[] = [];
+  for (const m of movies) {
+    if (!isKoreanOrJapaneseCandidate(m)) {
+      kept.push(m);
+    } else if (eaCount < maxCount) {
+      eaCount++;
+      kept.push(m);
+    } else {
+      skipped.push(m);
+    }
+  }
+  if (preserveMinCount > 0) {
+    const targetMin = Math.min(preserveMinCount, movies.length);
+    for (const extra of skipped) {
+      if (kept.length >= targetMin) break;
+      kept.push(extra);
+    }
+  }
+  return kept;
+}
+
 export function hasExplicitFamilyOrKidsPreference(
   preferences: EveningPreferences
 ): boolean {
@@ -2874,7 +2955,7 @@ function evaluateMovieCategoryDetails(
 
     const effectiveIds =
       rule.id === "thriller" && resolvedMediaType !== "tv"
-        ? [53, 80]
+        ? [53]
         : rule.allowedGenreIds;
     if (effectiveIds.some((gid) => idSet.has(gid))) {
       matchedRuleCount++;
@@ -7744,6 +7825,22 @@ export function scoreCandidateForUserProfile(
     score += 10;
   }
 
+  // Prevent Korean/Japanese titles with inflated TMDB ratings from flooding results
+  // unless the user explicitly requested Korean/Japanese/Anime content.
+  if (
+    !hasExplicitKoreanOrJapanesePreference(preferences) &&
+    isKoreanOrJapaneseCandidate({
+      originalLanguage:
+        (candidate as { originalLanguage?: string }).originalLanguage ||
+        candMeta.originalLanguage,
+      title: candidate.title,
+      originalTitle: candidate.originalTitle,
+      year: candidate.year,
+    })
+  ) {
+    score -= 6;
+  }
+
   return Math.round(score * 100) / 100;
 }
 
@@ -8344,11 +8441,16 @@ export function generateSmartRecommendationsWithStatus(
   );
 
   const dedupedByFranchise = limitOnePerFranchise(verifiedResult.items, 5);
-  const finalLimited = limitAnimatedRecommendations(
-    dedupedByFranchise,
+  const finalLimited = limitEastAsianRecommendations(
+    limitAnimatedRecommendations(
+      dedupedByFranchise,
+      effectivePreferences,
+      1,
+      watchedMovies,
+      5
+    ),
     effectivePreferences,
-    1,
-    watchedMovies,
+    0,
     5
   )
     .slice(0, 5)
